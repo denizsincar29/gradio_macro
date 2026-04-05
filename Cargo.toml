@@ -4,25 +4,31 @@ description = "A macro for generating Gradio interfaces."
 version = "0.4.0"
 authors = ["Deniz Sincar <deniz@r1oaz.ru>"]
 edition = "2021"
-repository = "https://github.com/denizsincar29/gradio_macro_test"
+repository = "https://github.com/denizsincar29/gradio_macro"
 readme = "README.md"
 license = "MIT"
 keywords = ["gradio", "macro", "ai", "huggingface"]
 exclude = ["wavs/"]
+
 [dependencies]
 anyhow = "1.0.86"
+clap = { version = "4", features = ["derive", "env"] }
 gradio = "0.3.2"
 heck = "0.5.0"
-
+regex = "1"
 proc-macro2 = "1.0"
 quote = "1.0.37"
 serde = "1.0.209"
 serde_json = "1.0.127"
 syn = "2.0.76"
+tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
-tokio = { version = "1.10.0", features = ["full"] }
 
 [lib]
 proc-macro = true
+
+[[bin]]
+name = "gradio_cache_update"
+path = "src/bin/gradio_cache_update.rs"
 

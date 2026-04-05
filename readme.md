@@ -1,4 +1,4 @@
-# gradio_macro_test
+# gradio_macro
 
 A macro that generates type-safe API client code for Gradio Rust crate endpoints at compile time.
 
@@ -67,14 +67,43 @@ The macro generates the `WhisperLarge` struct and all its methods automatically 
 
 The first build fetches the API spec from the Gradio server and saves it to `.gradio_cache/<url>.json` in your project root. Subsequent builds load the spec from the cache without making any network request.
 
-### Refreshing the cache
+### Refreshing the cache with the CLI tool
 
-**Option 1 – environment variable (refreshes all cached specs):**
+Install the `gradio_cache_update` binary once:
+
+```bash
+cargo install gradio_macro
+```
+
+Then, from your project root, update all caches automatically:
+
+```bash
+# Auto-scan the current project and refresh every cached spec
+gradio_cache_update
+
+# Cache specific spaces directly
+gradio_cache_update hf-audio/whisper-large-v3-turbo jacoblincool/vocal-separation
+
+# Scan a different directory
+gradio_cache_update --scan path/to/other/project
+
+# Write cache files to a custom directory
+gradio_cache_update --output-dir my_cache
+
+# Authenticate with HuggingFace for private spaces
+gradio_cache_update --hf-token hf_...
+# or via env var
+HF_TOKEN=hf_... gradio_cache_update
+```
+
+### Other ways to refresh the cache
+
+**Environment variable (refreshes all cached specs at build time):**
 ```bash
 GRADIO_REFRESH_API_CACHE=1 cargo build
 ```
 
-**Option 2 – macro argument (refreshes only the annotated struct):**
+**Macro argument (refreshes only the annotated struct):**
 ```rust
 #[gradio_api(url = "hf-audio/whisper-large-v3-turbo", option = "async", cache = "refresh")]
 pub struct WhisperLarge;

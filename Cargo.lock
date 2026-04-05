@@ -365,10 +365,12 @@ name = "gradio_macro"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "clap",
  "gradio",
  "heck",
  "proc-macro2",
  "quote",
+ "regex",
  "serde",
  "serde_json",
  "syn",
