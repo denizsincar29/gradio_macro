@@ -113,9 +113,56 @@ pub struct WhisperLarge;
 
 You may commit the `.gradio_cache/` directory to version control for fully reproducible, offline-capable builds.  To always fetch a fresh spec instead, add `.gradio_cache/` to your `.gitignore`.
 
+## Building CLI tools with `gradio_cli`
+`gradio_cli` turns a Gradio API spec into a fully-featured `clap` CLI in a single attribute:
+
+```rust
+use clap::Parser;
+use gradio_macro::gradio_cli;
+
+#[gradio_cli(url = "hf-audio/whisper-large-v3-turbo", option = "async")]
+pub struct WhisperCli;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = WhisperCli::parse();
+    let result = cli.run().await?;
+    for output in &result {
+        println!("{}", output.clone().as_value()?);
+    }
+    Ok(())
+}
+```
+
+Each named endpoint becomes a subcommand, each parameter a `--long` flag:
+
+```text
+$ cargo run -- --help
+Gradio API client for hf-audio/whisper-large-v3-turbo
+
+Usage: whisper_cli <COMMAND>
+
+Commands:
+  predict   Calls the `/predict` Gradio endpoint
+  predict1  Calls the `/predict_1` Gradio endpoint
+  predict2  Calls the `/predict_2` Gradio endpoint
+  help      Print this message or the help of the given subcommand(s)
+
+$ cargo run -- predict --help
+Usage: whisper_cli predict [OPTIONS] --inputs <INPUTS>
+
+Options:
+  --inputs <INPUTS>  parameter_1 (filepath)
+  --task   <TASK>    Task [default: transcribe] [possible values: transcribe, translate]
+  -h, --help         Print help
+```
+
+`Literal[...]` Python types are automatically mapped to clap `possible_values`, giving
+built-in validation and shell completions for free.
+
 ## How it works
 
-The `#[gradio_api(...)]` attribute macro calls the [gradio](https://crates.io/crates/gradio) Rust crate at compile time to introspect the target Gradio space and generate a bespoke client struct.
+The `#[gradio_api(...)]` and `#[gradio_cli(...)]` attribute macros call the [gradio](https://crates.io/crates/gradio) Rust crate at compile time to introspect the target Gradio space and generate a bespoke client struct or CLI struct.
 
 ## Limitations
 

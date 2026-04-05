@@ -1,0 +1,353 @@
+{
+  "named_endpoints": {
+    "/plot_spectrogram": {
+      "parameters": [
+        {
+          "label": "Vocals",
+          "parameter_name": "audio",
+          "parameter_default": null,
+          "parameter_has_default": false,
+          "component": "Audio",
+          "example_input": {
+            "meta": {
+              "_type": "gradio.FileData"
+            },
+            "orig_name": "audio_sample.wav",
+            "path": "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav",
+            "url": "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav"
+          },
+          "type": {
+            "type": "object",
+            "description": ""
+          },
+          "python_type": {
+            "type": "filepath",
+            "description": ""
+          }
+        }
+      ],
+      "returns": [
+        {
+          "label": "Vocal spectrogram",
+          "parameter_name": null,
+          "parameter_default": null,
+          "parameter_has_default": null,
+          "component": "Plot",
+          "example_input": null,
+          "type": {
+            "type": "object",
+            "description": ""
+          },
+          "python_type": {
+            "type": "Dict(type: Literal['altair', 'bokeh', 'plotly', 'matplotlib'], plot: str)",
+            "description": ""
+          }
+        }
+      ],
+      "show_api": true
+    },
+    "/from_youtube": {
+      "parameters": [
+        {
+          "label": "YouTube URL",
+          "parameter_name": "url",
+          "parameter_default": null,
+          "parameter_has_default": false,
+          "component": "Textbox",
+          "example_input": "Hello!!",
+          "type": {
+            "type": "string",
+            "description": ""
+          },
+          "python_type": {
+            "type": "str",
+            "description": ""
+          }
+        },
+        {
+          "label": "Select a model",
+          "parameter_name": "model",
+          "parameter_default": "BS-RoFormer",
+          "parameter_has_default": true,
+          "component": "Radio",
+          "example_input": "BS-RoFormer",
+          "type": {
+            "type": "string",
+            "description": ""
+          },
+          "python_type": {
+            "type": "Literal['BS-RoFormer', 'Mel-RoFormer', 'HTDemucs-FT']",
+            "description": ""
+          }
+        }
+      ],
+      "returns": [
+        {
+          "label": "Upload an audio file",
+          "parameter_name": null,
+          "parameter_default": null,
+          "parameter_has_default": null,
+          "component": "Audio",
+          "example_input": null,
+          "type": {
+            "type": "object",
+            "description": ""
+          },
+          "python_type": {
+            "type": "filepath",
+            "description": ""
+          }
+        },
+        {
+          "label": "Vocals",
+          "parameter_name": null,
+          "parameter_default": null,
+          "parameter_has_default": null,
+          "component": "Audio",
+          "example_input": null,
+          "type": {
+            "type": "object",
+            "description": ""
+          },
+          "python_type": {
+            "type": "filepath",
+            "description": ""
+          }
+        },
+        {
+          "label": "Background",
+          "parameter_name": null,
+          "parameter_default": null,
+          "parameter_has_default": null,
+          "component": "Audio",
+          "example_input": null,
+          "type": {
+            "type": "object",
+            "description": ""
+          },
+          "python_type": {
+            "type": "filepath",
+            "description": ""
+          }
+        }
+      ],
+      "show_api": true
+    },
+    "/plot_spectrogram_2": {
+      "parameters": [
+        {
+          "label": "Vocals",
+          "parameter_name": "audio",
+          "parameter_default": null,
+          "parameter_has_default": false,
+          "component": "Audio",
+          "example_input": {
+            "meta": {
+              "_type": "gradio.FileData"
+            },
+            "orig_name": "audio_sample.wav",
+            "path": "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav",
+            "url": "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav"
+          },
+          "type": {
+            "type": "object",
+            "description": ""
+          },
+          "python_type": {
+            "type": "filepath",
+            "description": ""
+          }
+        }
+      ],
+      "returns": [
+        {
+          "label": "Vocal spectrogram",
+          "parameter_name": null,
+          "parameter_default": null,
+          "parameter_has_default": null,
+          "component": "Plot",
+          "example_input": null,
+          "type": {
+            "type": "object",
+            "description": ""
+          },
+          "python_type": {
+            "type": "Dict(type: Literal['altair', 'bokeh', 'plotly', 'matplotlib'], plot: str)",
+            "description": ""
+          }
+        }
+      ],
+      "show_api": true
+    },
+    "/separate": {
+      "parameters": [
+        {
+          "label": "Upload an audio file",
+          "parameter_name": "param_0",
+          "parameter_default": null,
+          "parameter_has_default": false,
+          "component": "Audio",
+          "example_input": {
+            "meta": {
+              "_type": "gradio.FileData"
+            },
+            "orig_name": "audio_sample.wav",
+            "path": "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav",
+            "url": "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav"
+          },
+          "type": {
+            "type": "object",
+            "description": ""
+          },
+          "python_type": {
+            "type": "filepath",
+            "description": ""
+          }
+        },
+        {
+          "label": "Select a model",
+          "parameter_name": "param_1",
+          "parameter_default": "BS-RoFormer",
+          "parameter_has_default": true,
+          "component": "Radio",
+          "example_input": "BS-RoFormer",
+          "type": {
+            "type": "string",
+            "description": ""
+          },
+          "python_type": {
+            "type": "Literal['BS-RoFormer', 'Mel-RoFormer', 'HTDemucs-FT']",
+            "description": ""
+          }
+        }
+      ],
+      "returns": [
+        {
+          "label": "Vocals",
+          "parameter_name": null,
+          "parameter_default": null,
+          "parameter_has_default": null,
+          "component": "Audio",
+          "example_input": null,
+          "type": {
+            "type": "object",
+            "description": ""
+          },
+          "python_type": {
+            "type": "filepath",
+            "description": ""
+          }
+        },
+        {
+          "label": "Background",
+          "parameter_name": null,
+          "parameter_default": null,
+          "parameter_has_default": null,
+          "component": "Audio",
+          "example_input": null,
+          "type": {
+            "type": "object",
+            "description": ""
+          },
+          "python_type": {
+            "type": "filepath",
+            "description": ""
+          }
+        }
+      ],
+      "show_api": true
+    },
+    "/plot_spectrogram_1": {
+      "parameters": [
+        {
+          "label": "Background",
+          "parameter_name": "audio",
+          "parameter_default": null,
+          "parameter_has_default": false,
+          "component": "Audio",
+          "example_input": {
+            "meta": {
+              "_type": "gradio.FileData"
+            },
+            "orig_name": "audio_sample.wav",
+            "path": "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav",
+            "url": "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav"
+          },
+          "type": {
+            "type": "object",
+            "description": ""
+          },
+          "python_type": {
+            "type": "filepath",
+            "description": ""
+          }
+        }
+      ],
+      "returns": [
+        {
+          "label": "Background spectrogram",
+          "parameter_name": null,
+          "parameter_default": null,
+          "parameter_has_default": null,
+          "component": "Plot",
+          "example_input": null,
+          "type": {
+            "type": "object",
+            "description": ""
+          },
+          "python_type": {
+            "type": "Dict(type: Literal['altair', 'bokeh', 'plotly', 'matplotlib'], plot: str)",
+            "description": ""
+          }
+        }
+      ],
+      "show_api": true
+    },
+    "/plot_spectrogram_3": {
+      "parameters": [
+        {
+          "label": "Background",
+          "parameter_name": "audio",
+          "parameter_default": null,
+          "parameter_has_default": false,
+          "component": "Audio",
+          "example_input": {
+            "meta": {
+              "_type": "gradio.FileData"
+            },
+            "orig_name": "audio_sample.wav",
+            "path": "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav",
+            "url": "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav"
+          },
+          "type": {
+            "type": "object",
+            "description": ""
+          },
+          "python_type": {
+            "type": "filepath",
+            "description": ""
+          }
+        }
+      ],
+      "returns": [
+        {
+          "label": "Background spectrogram",
+          "parameter_name": null,
+          "parameter_default": null,
+          "parameter_has_default": null,
+          "component": "Plot",
+          "example_input": null,
+          "type": {
+            "type": "object",
+            "description": ""
+          },
+          "python_type": {
+            "type": "Dict(type: Literal['altair', 'bokeh', 'plotly', 'matplotlib'], plot: str)",
+            "description": ""
+          }
+        }
+      ],
+      "show_api": true
+    }
+  }
+}

@@ -1,5 +1,5 @@
 use gradio::ClientOptions;
-use heck::ToSnakeCase;
+use heck::{ToSnakeCase, ToUpperCamelCase};
 use proc_macro2::{Ident, Span};
 use proc_macro::TokenStream;
 use syn::{parse_macro_input, punctuated::Punctuated, Expr, ItemStruct, Meta};
@@ -9,6 +9,44 @@ use quote::quote;
 enum Syncity {
     Sync,
     Async,
+}
+
+/// Parse `Literal['a', 'b', 'c']` or `Literal["x", "y"]` Python type annotations into a list of
+/// string variants. Returns `None` when the type string is not a Literal type.
+fn parse_literal_variants(python_type: &str) -> Option<Vec<String>> {
+    // Quick path: must contain "Literal["
+    if !python_type.contains("Literal[") {
+        return None;
+    }
+    let start = python_type.find("Literal[")? + "Literal[".len();
+    let inner = &python_type[start..];
+    let end = inner.rfind(']')?;
+    let inner = &inner[..end];
+
+    // Collect all single-quoted or double-quoted strings
+    let mut variants = Vec::new();
+    let chars: Vec<char> = inner.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\'' || chars[i] == '"' {
+            let quote_char = chars[i];
+            i += 1;
+            let mut s = String::new();
+            while i < chars.len() && chars[i] != quote_char {
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    i += 1;
+                    s.push(chars[i]);
+                } else {
+                    s.push(chars[i]);
+                }
+                i += 1;
+            }
+            variants.push(s);
+        }
+        i += 1;
+    }
+
+    if variants.is_empty() { None } else { Some(variants) }
 }
 
 fn make_compile_error(message: &str) -> TokenStream {
@@ -78,40 +116,179 @@ fn get_api_info(
     Ok(api)
 }
 
-/// Map a Gradio python type string to a concrete Rust parameter type and a
-/// corresponding `PredictionInput` construction expression.
+/// Holds all code-generation fragments for a single API parameter.
+struct ParamCodegen {
+    /// The Rust type for the function parameter (e.g. `impl Into<String>`, `f64`).
+    rust_type: proc_macro2::TokenStream,
+    /// Optional let-binding to convert the caller's value to a concrete type
+    /// (e.g. `let ident = ident.into();`).
+    binding: Option<proc_macro2::TokenStream>,
+    /// Optional runtime validation expression that returns `Err(...)`.
+    validation: Option<proc_macro2::TokenStream>,
+    /// Expression that constructs a `gradio::PredictionInput` from the (bound) ident.
+    call_expr: proc_macro2::TokenStream,
+    /// Rust field type used in the generated clap CLI struct.
+    cli_type: proc_macro2::TokenStream,
+    /// Extra clap `#[arg(...)]` attributes for the generated CLI field.
+    cli_arg_attrs: Vec<proc_macro2::TokenStream>,
+}
+
+/// Map a Gradio API parameter to a [`ParamCodegen`] with all code fragments.
 fn map_type(
     python_type: &str,
     is_file: bool,
     arg_ident: &Ident,
-) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    has_default: bool,
+    default_value: Option<&serde_json::Value>,
+) -> ParamCodegen {
+    // ── filepath ──────────────────────────────────────────────────────────
     if is_file {
-        return (
-            quote! { impl Into<std::path::PathBuf> },
-            quote! { gradio::PredictionInput::from_file(#arg_ident) },
-        );
+        let file_exists_check = quote! {
+            {
+                let __path: &std::path::Path = #arg_ident.as_ref();
+                if !__path.exists() {
+                    return Err(gradio::anyhow::anyhow!(
+                        "File not found for parameter `{}`: {}",
+                        stringify!(#arg_ident),
+                        __path.display()
+                    ));
+                }
+            }
+        };
+        return ParamCodegen {
+            rust_type: quote! { impl Into<std::path::PathBuf> + AsRef<std::path::Path> },
+            binding: Some(quote! { let #arg_ident: std::path::PathBuf = #arg_ident.into(); }),
+            validation: Some(file_exists_check),
+            call_expr: quote! { gradio::PredictionInput::from_file(&#arg_ident) },
+            cli_type: quote! { std::path::PathBuf },
+            cli_arg_attrs: vec![],
+        };
     }
+
+    // ── Literal['a', 'b', ...] ────────────────────────────────────────────
+    if let Some(variants) = parse_literal_variants(python_type) {
+        let variant_strs: Vec<&str> = variants.iter().map(|s| s.as_str()).collect();
+        let allowed_msg = variant_strs.join(", ");
+        let validation = quote! {
+            {
+                const __ALLOWED: &[&str] = &[#(#variant_strs),*];
+                if !__ALLOWED.contains(&#arg_ident.as_str()) {
+                    return Err(gradio::anyhow::anyhow!(
+                        "Invalid value `{}` for parameter `{}`. Must be one of: {}",
+                        #arg_ident,
+                        stringify!(#arg_ident),
+                        #allowed_msg,
+                    ));
+                }
+            }
+        };
+
+        // Build clap attrs
+        let mut cli_arg_attrs = vec![
+            quote! { value_parser = [#(#variant_strs),*] },
+        ];
+        if has_default {
+            if let Some(dv) = default_value {
+                let dv_str = match dv {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                cli_arg_attrs.push(quote! { default_value = #dv_str });
+            }
+        }
+        let cli_arg_combined = cli_arg_attrs;
+
+        return ParamCodegen {
+            rust_type: quote! { impl Into<String> },
+            binding: Some(quote! { let #arg_ident: String = #arg_ident.into(); }),
+            validation: Some(validation),
+            call_expr: quote! { gradio::PredictionInput::from_value(#arg_ident.clone()) },
+            cli_type: quote! { String },
+            cli_arg_attrs: cli_arg_combined,
+        };
+    }
+
+    // ── Primitive types ───────────────────────────────────────────────────
     match python_type {
-        "str" => (
-            quote! { impl Into<String> },
-            quote! { gradio::PredictionInput::from_value(#arg_ident.into()) },
-        ),
-        "float" => (
-            quote! { f64 },
-            quote! { gradio::PredictionInput::from_value(#arg_ident) },
-        ),
-        "int" => (
-            quote! { i64 },
-            quote! { gradio::PredictionInput::from_value(#arg_ident) },
-        ),
-        "bool" => (
-            quote! { bool },
-            quote! { gradio::PredictionInput::from_value(#arg_ident) },
-        ),
-        _ => (
-            quote! { impl gradio::serde::Serialize },
-            quote! { gradio::PredictionInput::from_value(#arg_ident) },
-        ),
+        "str" => {
+            let mut cli_arg_attrs = vec![];
+            if has_default {
+                if let Some(dv) = default_value {
+                    let dv_str = match dv {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    cli_arg_attrs.push(quote! { default_value = #dv_str });
+                }
+            }
+            ParamCodegen {
+                rust_type: quote! { impl Into<String> },
+                binding: Some(quote! { let #arg_ident: String = #arg_ident.into(); }),
+                validation: None,
+                call_expr: quote! { gradio::PredictionInput::from_value(#arg_ident.clone()) },
+                cli_type: quote! { String },
+                cli_arg_attrs,
+            }
+        }
+        "float" => {
+            let mut cli_arg_attrs = vec![];
+            if has_default {
+                if let Some(dv) = default_value {
+                    let dv_str = dv.to_string();
+                    cli_arg_attrs.push(quote! { default_value = #dv_str });
+                }
+            }
+            ParamCodegen {
+                rust_type: quote! { f64 },
+                binding: None,
+                validation: None,
+                call_expr: quote! { gradio::PredictionInput::from_value(#arg_ident) },
+                cli_type: quote! { f64 },
+                cli_arg_attrs,
+            }
+        }
+        "int" => {
+            let mut cli_arg_attrs = vec![];
+            if has_default {
+                if let Some(dv) = default_value {
+                    let dv_str = dv.to_string();
+                    cli_arg_attrs.push(quote! { default_value = #dv_str });
+                }
+            }
+            ParamCodegen {
+                rust_type: quote! { i64 },
+                binding: None,
+                validation: None,
+                call_expr: quote! { gradio::PredictionInput::from_value(#arg_ident) },
+                cli_type: quote! { i64 },
+                cli_arg_attrs,
+            }
+        }
+        "bool" => {
+            let mut cli_arg_attrs = vec![];
+            if has_default {
+                if let Some(dv) = default_value {
+                    let dv_str = dv.to_string(); // "true" / "false"
+                    cli_arg_attrs.push(quote! { default_value = #dv_str });
+                }
+            }
+            ParamCodegen {
+                rust_type: quote! { bool },
+                binding: None,
+                validation: None,
+                call_expr: quote! { gradio::PredictionInput::from_value(#arg_ident) },
+                cli_type: quote! { bool },
+                cli_arg_attrs,
+            }
+        }
+        _ => ParamCodegen {
+            rust_type: quote! { impl gradio::serde::Serialize },
+            binding: None,
+            validation: None,
+            call_expr: quote! { gradio::PredictionInput::from_value(#arg_ident) },
+            cli_type: quote! { String },
+            cli_arg_attrs: vec![],
+        },
     }
 }
 
@@ -285,26 +462,35 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
             Span::call_site(),
         );
 
-        // Build parameter list and call args
-        let (args_def, args_call): (Vec<proc_macro2::TokenStream>, Vec<proc_macro2::TokenStream>) =
-            info.parameters
-                .iter()
-                .enumerate()
-                .map(|(i, param)| {
-                    let ident = param
-                        .parameter_name
-                        .as_deref()
-                        .or(param.label.as_deref())
-                        .map(|n| safe_ident(n, &format!("arg{}", i)))
-                        .unwrap_or_else(|| Ident::new(&format!("arg{}", i), Span::call_site()));
+        // Build parameter list, bindings, validations, and call args
+        let mut args_def: Vec<proc_macro2::TokenStream> = Vec::new();
+        let mut bindings: Vec<proc_macro2::TokenStream> = Vec::new();
+        let mut validations: Vec<proc_macro2::TokenStream> = Vec::new();
+        let mut args_call: Vec<proc_macro2::TokenStream> = Vec::new();
 
-                    let is_file = param.python_type.r#type == "filepath";
-                    let (rust_type, call_expr) =
-                        map_type(&param.python_type.r#type, is_file, &ident);
+        for (i, param) in info.parameters.iter().enumerate() {
+            let ident = param
+                .parameter_name
+                .as_deref()
+                .or(param.label.as_deref())
+                .map(|n| safe_ident(n, &format!("arg{}", i)))
+                .unwrap_or_else(|| Ident::new(&format!("arg{}", i), Span::call_site()));
 
-                    (quote! { #ident: #rust_type }, call_expr)
-                })
-                .unzip();
+            let is_file = param.python_type.r#type == "filepath";
+            let codegen = map_type(
+                &param.python_type.r#type,
+                is_file,
+                &ident,
+                param.parameter_has_default.unwrap_or(false),
+                param.parameter_default.as_ref(),
+            );
+
+            let rust_type = codegen.rust_type;
+            args_def.push(quote! { #ident: #rust_type });
+            if let Some(b) = codegen.binding { bindings.push(b); }
+            if let Some(v) = codegen.validation { validations.push(v); }
+            args_call.push(codegen.call_expr);
+        }
 
         // Build doc-comment lines
         let mut doc_lines: Vec<String> = Vec::new();
@@ -371,22 +557,30 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
             Syncity::Sync => quote! {
                 #(#doc_attrs)*
                 pub fn #method_name(&self, #(#args_def),*) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
+                    #(#bindings)*
+                    #(#validations)*
                     self.client.predict_sync(#name, vec![#(#args_call),*])
                 }
 
                 #[doc = #bg_doc]
                 pub fn #background_name(&self, #(#args_def),*) -> Result<gradio::PredictionStream, gradio::anyhow::Error> {
+                    #(#bindings)*
+                    #(#validations)*
                     self.client.submit_sync(#name, vec![#(#args_call),*])
                 }
             },
             Syncity::Async => quote! {
                 #(#doc_attrs)*
                 pub async fn #method_name(&self, #(#args_def),*) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
+                    #(#bindings)*
+                    #(#validations)*
                     self.client.predict(#name, vec![#(#args_call),*]).await
                 }
 
                 #[doc = #bg_doc]
                 pub async fn #background_name(&self, #(#args_def),*) -> Result<gradio::PredictionStream, gradio::anyhow::Error> {
+                    #(#bindings)*
+                    #(#validations)*
                     self.client.submit(#name, vec![#(#args_call),*]).await
                 }
             },
@@ -404,6 +598,7 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                 client: gradio::Client,
             }
 
+            #[allow(clippy::too_many_arguments)]
             impl #struct_name {
                 /// Create a new client connecting to the configured Gradio space.
                 pub fn new() -> Result<Self, gradio::anyhow::Error> {
@@ -437,6 +632,7 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                 client: gradio::Client,
             }
 
+            #[allow(clippy::too_many_arguments)]
             impl #struct_name {
                 /// Create a new client connecting to the configured Gradio space.
                 pub async fn new() -> Result<Self, gradio::anyhow::Error> {
@@ -468,4 +664,268 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     api_struct.into()
+}
+
+/// A procedural macro that generates a [`clap::Parser`]-based CLI struct from a Gradio API spec.
+///
+/// Each named API endpoint becomes a subcommand with a field for every parameter.
+/// The generated struct can be embedded in any binary with minimal boilerplate.
+///
+/// # Macro Parameters
+///
+/// - `url`: **Required**. The HuggingFace space identifier or full Gradio URL.
+/// - `option`: **Required**. `"sync"` or `"async"` — controls whether `run()` is `async` or not.
+/// - `hf_token`, `auth_username`, `auth_password`, `cache`: Same as [`gradio_api`].
+///
+/// # Generated Output
+///
+/// ```rust
+/// use gradio_macro::gradio_cli;
+///
+/// #[gradio_cli(url = "hf-audio/whisper-large-v3-turbo", option = "async")]
+/// pub struct WhisperCli;
+///
+/// #[tokio::main]
+/// async fn main() -> anyhow::Result<()> {
+///     use clap::Parser;
+///     let cli = WhisperCli::parse();
+///     let result = cli.run().await?;
+///     println!("{:?}", result);
+///     Ok(())
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn gradio_cli(args: TokenStream, input: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(args with Punctuated::<Meta, syn::Token![,]>::parse_terminated);
+    let input = parse_macro_input!(input as ItemStruct);
+    let (mut url, mut option, mut grad_token, mut grad_login, mut grad_password, mut cache_refresh) =
+        (None, None, None, None, None, false);
+
+    for item in args.iter() {
+        let Ok(meta_value) = item.require_name_value() else { continue; };
+        let Expr::Lit(ref lit_val) = meta_value.value else { continue; };
+        let syn::Lit::Str(ref lit_val) = lit_val.lit else { continue; };
+        let arg_value = lit_val.value();
+        if item.path().is_ident("url") {
+            url = Some(arg_value);
+        } else if item.path().is_ident("option") {
+            option = Some(if arg_value == "sync" { Syncity::Sync } else { Syncity::Async });
+        } else if item.path().is_ident("hf_token") {
+            grad_token = Some(arg_value);
+        } else if item.path().is_ident("auth_username") {
+            grad_login = Some(arg_value);
+        } else if item.path().is_ident("auth_password") {
+            grad_password = Some(arg_value);
+        } else if item.path().is_ident("cache") {
+            cache_refresh = arg_value == "refresh";
+        }
+    }
+
+    let Some(url) = url else {
+        return make_compile_error("url is required");
+    };
+
+    let mut grad_opts = ClientOptions::default();
+    let mut grad_auth: Option<(String, String)> = None;
+    if grad_token.is_some() {
+        grad_opts.hf_token = grad_token.clone();
+    }
+    if grad_login.is_some() ^ grad_password.is_some() {
+        return make_compile_error("Both login and password must be present!");
+    } else if grad_login.is_some() && grad_password.is_some() {
+        grad_auth = Some((grad_login.clone().unwrap(), grad_password.clone().unwrap()));
+        grad_opts.auth = grad_auth.clone();
+    }
+
+    let Some(option) = option else {
+        return make_compile_error("option is required");
+    };
+
+    let api = match get_api_info(&url, grad_opts, cache_refresh) {
+        Ok(api) => api,
+        Err(e) => return make_compile_error(&format!("Failed to fetch Gradio API for \"{}\": {}", url, e)),
+    };
+
+    let grad_auth_ts = if grad_auth.is_some() {
+        quote! { Some((#grad_login.to_string(), #grad_password.to_string())) }
+    } else {
+        quote! { None }
+    };
+    let grad_token_ts = if let Some(ref val) = grad_token {
+        quote! { Some(#val.to_string()) }
+    } else {
+        quote! { None }
+    };
+    let grad_opts_ts = quote! {
+        gradio::ClientOptions {
+            auth: #grad_auth_ts,
+            hf_token: #grad_token_ts,
+        }
+    };
+
+    let vis = input.vis.clone();
+    let struct_name = input.ident.clone();
+
+    // Build the subcommand enum name: <StructName>Command
+    let cmd_enum_name = Ident::new(
+        &format!("{}Command", struct_name),
+        Span::call_site(),
+    );
+
+    // Build one enum variant per named endpoint
+    let mut variants: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut match_arms: Vec<proc_macro2::TokenStream> = Vec::new();
+
+    for (ep_name, info) in api.named_endpoints.iter() {
+        // e.g. "/predict" → "Predict"
+        let variant_str = ep_name
+            .trim_start_matches('/')
+            .replace('/', "_")
+            .to_upper_camel_case();
+        let variant_str = if variant_str.is_empty() {
+            "Default".to_string()
+        } else {
+            variant_str
+        };
+        let variant_name = Ident::new(&variant_str, Span::call_site());
+
+        // Build fields and match-arm locals for this endpoint
+        let mut field_defs: Vec<proc_macro2::TokenStream> = Vec::new();
+        let mut match_locals: Vec<proc_macro2::TokenStream> = Vec::new();
+        let mut call_inputs: Vec<proc_macro2::TokenStream> = Vec::new();
+        let mut field_idents: Vec<Ident> = Vec::new();
+
+        for (i, param) in info.parameters.iter().enumerate() {
+            let ident = param
+                .parameter_name
+                .as_deref()
+                .or(param.label.as_deref())
+                .map(|n| safe_ident(n, &format!("arg{}", i)))
+                .unwrap_or_else(|| Ident::new(&format!("arg{}", i), Span::call_site()));
+
+            let is_file = param.python_type.r#type == "filepath";
+            let codegen = map_type(
+                &param.python_type.r#type,
+                is_file,
+                &ident,
+                param.parameter_has_default.unwrap_or(false),
+                param.parameter_default.as_ref(),
+            );
+
+            let cli_type = codegen.cli_type;
+            let cli_attrs = codegen.cli_arg_attrs;
+
+            // Build doc for the field
+            let label = param.label.as_deref().unwrap_or("");
+            let py_type = &param.python_type.r#type;
+            let field_doc = if label.is_empty() {
+                format!("`{}` parameter ({})", ident, py_type)
+            } else {
+                format!("{} (`{}`)", label, py_type)
+            };
+
+            // For match arm, the field is accessed as a plain ident
+            // We need to adapt cli_call_expr to use just `ident` rather than `self.ident`
+            let match_call_expr = if is_file {
+                quote! { gradio::PredictionInput::from_file(#ident) }
+            } else {
+                // Reuse call_expr pattern based on type
+                quote! { gradio::PredictionInput::from_value(#ident.clone()) }
+            };
+
+            if cli_attrs.is_empty() {
+                field_defs.push(quote! {
+                    #[doc = #field_doc]
+                    #[arg(long)]
+                    #ident: #cli_type,
+                });
+            } else {
+                field_defs.push(quote! {
+                    #[doc = #field_doc]
+                    #[arg(long, #(#cli_attrs),*)]
+                    #ident: #cli_type,
+                });
+            }
+
+            // validation for match arm
+            if let Some(v) = codegen.validation {
+                match_locals.push(v);
+            }
+            call_inputs.push(match_call_expr);
+            field_idents.push(ident);
+        }
+
+        // Build the doc comment for the variant
+        let variant_doc = format!("Calls the `{}` Gradio endpoint.", ep_name);
+
+        // Build the variant definition
+        let variant_def = quote! {
+            #[doc = #variant_doc]
+            #variant_name {
+                #(#field_defs)*
+            },
+        };
+        variants.push(variant_def);
+
+        // Build the match arm for the run() method
+        let match_arm_async = quote! {
+            #cmd_enum_name::#variant_name { #(ref #field_idents),* } => {
+                #(#match_locals)*
+                client.predict(#ep_name, vec![#(#call_inputs),*]).await
+            }
+        };
+        let match_arm_sync = quote! {
+            #cmd_enum_name::#variant_name { #(ref #field_idents),* } => {
+                #(#match_locals)*
+                client.predict_sync(#ep_name, vec![#(#call_inputs),*])
+            }
+        };
+
+        match option {
+            Syncity::Async => match_arms.push(match_arm_async),
+            Syncity::Sync => match_arms.push(match_arm_sync),
+        }
+    }
+
+    let about_str = format!("Gradio API client for {}", url);
+    let run_fn = match option {
+        Syncity::Async => quote! {
+            /// Run the selected subcommand against the Gradio API.
+            pub async fn run(&self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
+                let client = gradio::Client::new(#url, #grad_opts_ts).await?;
+                match &self.command {
+                    #(#match_arms)*
+                }
+            }
+        },
+        Syncity::Sync => quote! {
+            /// Run the selected subcommand against the Gradio API.
+            pub fn run(&self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
+                let client = gradio::Client::new_sync(#url, #grad_opts_ts)?;
+                match &self.command {
+                    #(#match_arms)*
+                }
+            }
+        },
+    };
+
+    let output = quote! {
+        #[derive(Debug, clap::Parser)]
+        #[command(about = #about_str)]
+        #vis struct #struct_name {
+            #[command(subcommand)]
+            pub command: #cmd_enum_name,
+        }
+
+        #[derive(Debug, clap::Subcommand)]
+        #vis enum #cmd_enum_name {
+            #(#variants)*
+        }
+
+        impl #struct_name {
+            #run_fn
+        }
+    };
+
+    output.into()
 }
