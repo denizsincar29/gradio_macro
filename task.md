@@ -1,0 +1,13 @@
+# Task
+Carefully read this document and implement everything stated here, unless the point is very impractical and you have your own better idea. In that case, please share your idea and we can discuss it. The points are not in any particular order, so feel free to implement them in any order you want.
+Strictly follow the points, and if you have any questions or need clarification on any point, please ask before implementing it. The goal is to improve the codebase and make it more user-friendly, so any suggestions or improvements are welcome.
+1. The optional parameters must be really optional in the macro generated endpoint functions. Or, maybe it is better to make a builder like syntax: model.endpointname(mandatory, parameters).with_optional1(x).with_optional_2().start()  or what would you call the function that does the work.
+2. Can we do enums on variants? E.g. language in the omnivoice example. I think it's a good idea.
+3. Can return values have already be typed, without making it like as_text / as_file / whatever?
+4. Lets switch to thiserror.
+5. In examples, make clap derived command line parameters for whatever is needed for the example, since I've deleted the wavs and other things. In omnivoice example, delete the voice design example, keep voice clone. Make it so that the user can specify input reference audiofile, output file, and input text / file / stdin pipe.
+6. Add clap derive for dependencies for examples, not for the library itself. Keep only the necessary dependencies for the library.
+7. As for the cache updater binary, I think it's not needed. Just make cargo build --features gradio_macro/update_cache i guess, or how to pass features to gradio macro library?
+8. Make ttl for cache and a warning on build if the cache is outdated. The warning must autogenerate on line with `#[gradio_api(...)]` and explain that to update the cache, you need to run with the update cache feature. This is for vscode not to hang. Also make a compile error if there is no cache at all.
+9. Can we identify if cargo is run by rust analizer or not? Don't want for vscode to update cache on build, but also i'm not so satisfied with the idea of introducing a concept of cache updater feature. But it looks better than binary over all!
+10. Review the code, test the examples, and look for any possible improvements. E.g., if the code needs to be more modular / restructured, or if there are any edge cases that need to be handled. Check how can the experience with billion optional parameters of endpoints be improved, as I said in point 1.
