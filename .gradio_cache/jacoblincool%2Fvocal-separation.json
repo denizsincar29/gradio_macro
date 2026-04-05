@@ -46,6 +46,52 @@
       ],
       "show_api": true
     },
+    "/plot_spectrogram_1": {
+      "parameters": [
+        {
+          "label": "Background",
+          "parameter_name": "audio",
+          "parameter_default": null,
+          "parameter_has_default": false,
+          "component": "Audio",
+          "example_input": {
+            "meta": {
+              "_type": "gradio.FileData"
+            },
+            "orig_name": "audio_sample.wav",
+            "path": "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav",
+            "url": "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav"
+          },
+          "type": {
+            "type": "object",
+            "description": ""
+          },
+          "python_type": {
+            "type": "filepath",
+            "description": ""
+          }
+        }
+      ],
+      "returns": [
+        {
+          "label": "Background spectrogram",
+          "parameter_name": null,
+          "parameter_default": null,
+          "parameter_has_default": null,
+          "component": "Plot",
+          "example_input": null,
+          "type": {
+            "type": "object",
+            "description": ""
+          },
+          "python_type": {
+            "type": "Dict(type: Literal['altair', 'bokeh', 'plotly', 'matplotlib'], plot: str)",
+            "description": ""
+          }
+        }
+      ],
+      "show_api": true
+    },
     "/from_youtube": {
       "parameters": [
         {
@@ -133,10 +179,10 @@
       ],
       "show_api": true
     },
-    "/plot_spectrogram_2": {
+    "/plot_spectrogram_3": {
       "parameters": [
         {
-          "label": "Vocals",
+          "label": "Background",
           "parameter_name": "audio",
           "parameter_default": null,
           "parameter_has_default": false,
@@ -161,7 +207,7 @@
       ],
       "returns": [
         {
-          "label": "Vocal spectrogram",
+          "label": "Background spectrogram",
           "parameter_name": null,
           "parameter_default": null,
           "parameter_has_default": null,
@@ -257,10 +303,10 @@
       ],
       "show_api": true
     },
-    "/plot_spectrogram_1": {
+    "/plot_spectrogram_2": {
       "parameters": [
         {
-          "label": "Background",
+          "label": "Vocals",
           "parameter_name": "audio",
           "parameter_default": null,
           "parameter_has_default": false,
@@ -285,53 +331,7 @@
       ],
       "returns": [
         {
-          "label": "Background spectrogram",
-          "parameter_name": null,
-          "parameter_default": null,
-          "parameter_has_default": null,
-          "component": "Plot",
-          "example_input": null,
-          "type": {
-            "type": "object",
-            "description": ""
-          },
-          "python_type": {
-            "type": "Dict(type: Literal['altair', 'bokeh', 'plotly', 'matplotlib'], plot: str)",
-            "description": ""
-          }
-        }
-      ],
-      "show_api": true
-    },
-    "/plot_spectrogram_3": {
-      "parameters": [
-        {
-          "label": "Background",
-          "parameter_name": "audio",
-          "parameter_default": null,
-          "parameter_has_default": false,
-          "component": "Audio",
-          "example_input": {
-            "meta": {
-              "_type": "gradio.FileData"
-            },
-            "orig_name": "audio_sample.wav",
-            "path": "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav",
-            "url": "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav"
-          },
-          "type": {
-            "type": "object",
-            "description": ""
-          },
-          "python_type": {
-            "type": "filepath",
-            "description": ""
-          }
-        }
-      ],
-      "returns": [
-        {
-          "label": "Background spectrogram",
+          "label": "Vocal spectrogram",
           "parameter_name": null,
           "parameter_default": null,
           "parameter_has_default": null,

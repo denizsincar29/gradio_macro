@@ -7,9 +7,9 @@
 //!
 //! ## Usage
 //!
-//! Install once:
+//! Install once (requires the `cli-tools` feature):
 //! ```text
-//! cargo install gradio_macro
+//! cargo install gradio_macro --features cli-tools
 //! ```
 //!
 //! Then, from your project root:

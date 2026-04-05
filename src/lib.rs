@@ -55,15 +55,35 @@ fn make_compile_error(message: &str) -> TokenStream {
 
 /// Returns the path to the cache file for the given URL.
 /// The cache is stored in `.gradio_cache/` relative to `CARGO_MANIFEST_DIR`.
+///
+/// The filename encodes the URL by percent-encoding non-alphanumeric/dash/dot
+/// characters, which avoids collisions between URLs that only differ in
+/// separator characters (e.g. `a/b` vs `a_b`).
 fn get_cache_path(url: &str) -> std::path::PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-    let safe_name: String = url
+    // Percent-encode the URL so that `a/b` → `a%2Fb` and `a_b` → `a_b`
+    // keeping only alphanumeric, `-`, `_`, and `.` as-is.
+    let encoded: String = url
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+        .flat_map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                vec![c]
+            } else {
+                let byte = c as u32;
+                if byte <= 0xFF {
+                    format!("%{:02X}", byte).chars().collect()
+                } else {
+                    // Multi-byte: encode each UTF-8 byte
+                    let mut buf = [0u8; 4];
+                    let s = c.encode_utf8(&mut buf);
+                    s.bytes().flat_map(|b| format!("%{:02X}", b).chars().collect::<Vec<_>>()).collect()
+                }
+            }
+        })
         .collect();
     std::path::PathBuf::from(manifest_dir)
         .join(".gradio_cache")
-        .join(format!("{}.json", safe_name))
+        .join(format!("{}.json", encoded))
 }
 
 /// Load the API info from the local cache file, if present and valid.
@@ -146,9 +166,9 @@ fn map_type(
         let file_exists_check = quote! {
             {
                 let __path: &std::path::Path = #arg_ident.as_ref();
-                if !__path.exists() {
+                if !__path.is_file() {
                     return Err(gradio::anyhow::anyhow!(
-                        "File not found for parameter `{}`: {}",
+                        "Path for parameter `{}` is not a file: {}",
                         stringify!(#arg_ident),
                         __path.display()
                     ));
@@ -292,8 +312,22 @@ fn map_type(
     }
 }
 
+/// A comprehensive list of Rust keywords that cannot be used as plain identifiers.
+/// These require raw-identifier (`r#...`) syntax when used as identifiers.
+const RUST_KEYWORDS: &[&str] = &[
+    "abstract", "as", "async", "await", "become", "box", "break", "const",
+    "continue", "crate", "do", "dyn", "else", "enum", "extern", "false",
+    "final", "fn", "for", "if", "impl", "in", "let", "loop", "macro",
+    "match", "mod", "move", "mut", "override", "priv", "pub", "ref",
+    "return", "self", "Self", "static", "struct", "super", "trait", "true",
+    "try", "type", "typeof", "union", "unsafe", "unsized", "use", "virtual",
+    "where", "while", "yield",
+];
+
 /// Convert a name string into a valid Rust snake_case identifier.
-/// Prefixes with `arg_` when the result starts with a digit or is empty.
+/// - Prefixes with `arg_` when the result starts with a digit or is empty.
+/// - Appends `_` (e.g. `type_`) when the result is a Rust keyword to avoid
+///   parse errors without requiring raw-identifier syntax in generated code.
 fn safe_ident(name: &str, fallback: &str) -> Ident {
     let snake_cased = name.to_snake_case();
     let with_fallback = if snake_cased.is_empty() {
@@ -301,7 +335,7 @@ fn safe_ident(name: &str, fallback: &str) -> Ident {
     } else {
         snake_cased
     };
-    let final_name = if with_fallback
+    let with_prefix = if with_fallback
         .chars()
         .next()
         .map(|c| c.is_ascii_digit())
@@ -310,6 +344,41 @@ fn safe_ident(name: &str, fallback: &str) -> Ident {
         format!("arg_{}", with_fallback)
     } else {
         with_fallback
+    };
+    // Disambiguate Rust keywords by appending `_`
+    let final_name = if RUST_KEYWORDS.contains(&with_prefix.as_str()) {
+        format!("{}_", with_prefix)
+    } else {
+        with_prefix
+    };
+    Ident::new(&final_name, Span::call_site())
+}
+
+/// Convert a name string into a valid Rust `UpperCamelCase` (PascalCase) identifier suitable
+/// for use as an enum variant name.
+/// - Prefixes with `Variant` when the result starts with a digit or is empty.
+/// - Appends `_` when the result would be a Rust keyword.
+fn safe_variant_ident(name: &str, fallback: &str) -> Ident {
+    let camel = name.to_upper_camel_case();
+    let with_fallback = if camel.is_empty() {
+        fallback.to_upper_camel_case()
+    } else {
+        camel
+    };
+    let with_prefix = if with_fallback
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
+        format!("Variant{}", with_fallback)
+    } else {
+        with_fallback
+    };
+    let final_name = if RUST_KEYWORDS.contains(&with_prefix.as_str()) {
+        format!("{}_", with_prefix)
+    } else {
+        with_prefix
     };
     Ident::new(&final_name, Span::call_site())
 }
@@ -325,10 +394,31 @@ fn safe_ident(name: &str, fallback: &str) -> Ident {
 /// - `option`: **Required**. Specifies whether the generated API methods should be synchronous or asynchronous.
 ///   - `"sync"`: Generates synchronous methods for interacting with the API.
 ///   - `"async"`: Generates asynchronous methods for interacting with the API.
-/// - `hf_token` (optional): HuggingFace space token.
-/// - `auth_username` (optional): HuggingFace username.
-/// - `auth_password` (optional): HuggingFace password.
+/// - `hf_token` (optional): HuggingFace API token for private spaces.  If not specified the
+///   generated `new()` method falls back to the `HF_TOKEN` environment variable at runtime.
+/// - `auth_username` (optional): HuggingFace username (must be paired with `auth_password`).
+/// - `auth_password` (optional): HuggingFace password (must be paired with `auth_username`).
 /// - `cache` (optional): Set to `"refresh"` to bypass the local API cache and re-fetch from the server.
+///
+/// # Authentication
+///
+/// For private spaces you can provide a token either at compile time or at runtime:
+///
+/// ```rust
+/// // Compile-time token (embedded in generated code – avoid committing real tokens!)
+/// #[gradio_api(url = "my-org/private-space", option = "async", hf_token = "hf_...")]
+/// pub struct Private;
+///
+/// // Runtime token via environment variable (recommended for production):
+/// // export HF_TOKEN=hf_...
+/// // Then just use the macro without hf_token – the generated new() picks it up.
+/// ```
+///
+/// # Proxy Support
+///
+/// The HTTP client used at runtime is [`reqwest`](https://docs.rs/reqwest), which honours the
+/// standard proxy environment variables: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and
+/// `NO_PROXY`. Set these before running your binary to route traffic through a proxy.
 ///
 /// # API Caching
 ///
@@ -394,7 +484,13 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
         if item.path().is_ident("url") {
             url = Some(arg_value);
         } else if item.path().is_ident("option") {
-            option = Some(if arg_value == "sync" { Syncity::Sync } else { Syncity::Async });
+            option = Some(match arg_value.as_str() {
+                "sync" => Syncity::Sync,
+                "async" => Syncity::Async,
+                _ => return make_compile_error(
+                    "invalid value for `option`: expected \"sync\" or \"async\"",
+                ),
+            });
         } else if item.path().is_ident("hf_token") {
             grad_token = Some(arg_value);
         } else if item.path().is_ident("auth_username") {
@@ -435,16 +531,20 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
     };
     let api = api.named_endpoints;
 
-    // Generate the client options token-stream used at runtime
+    // Generate the client options token-stream used at runtime.
+    // If no `hf_token` was specified in the macro, fall back to the `HF_TOKEN`
+    // environment variable at runtime so users don't need to hardcode tokens.
     let grad_auth_ts = if grad_auth.is_some() {
         quote! { Some((#grad_login.to_string(), #grad_password.to_string())) }
     } else {
         quote! { None }
     };
     let grad_token_ts = if let Some(ref val) = grad_token {
+        // Compile-time token: embed directly.
         quote! { Some(#val.to_string()) }
     } else {
-        quote! { None }
+        // Runtime fallback: check HF_TOKEN env var.
+        quote! { std::env::var("HF_TOKEN").ok() }
     };
     let grad_opts_ts = quote! {
         gradio::ClientOptions {
@@ -709,7 +809,13 @@ pub fn gradio_cli(args: TokenStream, input: TokenStream) -> TokenStream {
         if item.path().is_ident("url") {
             url = Some(arg_value);
         } else if item.path().is_ident("option") {
-            option = Some(if arg_value == "sync" { Syncity::Sync } else { Syncity::Async });
+            option = Some(match arg_value.as_str() {
+                "sync" => Syncity::Sync,
+                "async" => Syncity::Async,
+                _ => return make_compile_error(
+                    "invalid value for `option`: expected \"sync\" or \"async\"",
+                ),
+            });
         } else if item.path().is_ident("hf_token") {
             grad_token = Some(arg_value);
         } else if item.path().is_ident("auth_username") {
@@ -754,7 +860,8 @@ pub fn gradio_cli(args: TokenStream, input: TokenStream) -> TokenStream {
     let grad_token_ts = if let Some(ref val) = grad_token {
         quote! { Some(#val.to_string()) }
     } else {
-        quote! { None }
+        // Runtime fallback: check HF_TOKEN env var.
+        quote! { std::env::var("HF_TOKEN").ok() }
     };
     let grad_opts_ts = quote! {
         gradio::ClientOptions {
@@ -777,17 +884,11 @@ pub fn gradio_cli(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut match_arms: Vec<proc_macro2::TokenStream> = Vec::new();
 
     for (ep_name, info) in api.named_endpoints.iter() {
-        // e.g. "/predict" → "Predict"
-        let variant_str = ep_name
-            .trim_start_matches('/')
-            .replace('/', "_")
-            .to_upper_camel_case();
-        let variant_str = if variant_str.is_empty() {
-            "Default".to_string()
-        } else {
-            variant_str
-        };
-        let variant_name = Ident::new(&variant_str, Span::call_site());
+        // e.g. "/predict" → "Predict", "/_design_fn" → "DesignFn"
+        let variant_name = safe_variant_ident(
+            &ep_name.trim_start_matches('/').replace('/', "_"),
+            "Default",
+        );
 
         // Build fields and match-arm locals for this endpoint
         let mut field_defs: Vec<proc_macro2::TokenStream> = Vec::new();

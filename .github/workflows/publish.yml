@@ -50,11 +50,11 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build and test
-        run: cargo build --all-targets
+        run: cargo build --features cli-tools
 
       - name: Publish (dry run)
         if: ${{ github.event.inputs.dry_run == 'true' }}
-        run: cargo publish --dry-run
+        run: cargo publish --features cli-tools --dry-run
 
       - name: Publish
         if: ${{ github.event.inputs.dry_run != 'true' }}

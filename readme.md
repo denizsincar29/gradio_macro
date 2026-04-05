@@ -69,10 +69,10 @@ The first build fetches the API spec from the Gradio server and saves it to `.gr
 
 ### Refreshing the cache with the CLI tool
 
-Install the `gradio_cache_update` binary once:
+Install the `gradio_cache_update` binary once (the `cli-tools` feature enables the binary deps):
 
 ```bash
-cargo install gradio_macro
+cargo install gradio_macro --features cli-tools
 ```
 
 Then, from your project root, update all caches automatically:
