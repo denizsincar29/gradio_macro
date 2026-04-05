@@ -1,2 +1,6 @@
 result.txt
 /target
+# Gradio API spec cache.
+# By default the cache is NOT ignored so it can be committed for reproducible
+# offline builds.  Uncomment the line below to always fetch a fresh spec.
+# .gradio_cache/

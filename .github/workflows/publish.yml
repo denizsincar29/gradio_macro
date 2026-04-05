@@ -1,0 +1,63 @@
+# Publish the `gradio_macro` crate to crates.io
+#
+# This workflow is currently DISABLED (the `on:` triggers are commented out).
+# To enable it after renaming the repository to `gradio_macro`:
+#
+#   1. Rename the repo on GitHub (Settings → General → Repository name).
+#   2. Add a `CRATES_IO_TOKEN` secret to the repo
+#      (Settings → Secrets and variables → Actions → New repository secret).
+#   3. Uncomment the `on:` block below.
+#   4. Commit and push; the workflow will run automatically on the next
+#      version tag push (e.g. `git tag v0.4.1 && git push --tags`).
+
+# DISABLED — uncomment to activate:
+# on:
+#   push:
+#     tags:
+#       - "v[0-9]+.[0-9]+.[0-9]+"
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Perform a dry run (do not actually publish)"
+        required: false
+        default: "true"
+
+name: Publish to crates.io
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: cargo publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build and test
+        run: cargo build --features cli-tools
+
+      - name: Publish (dry run)
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        run: cargo publish --features cli-tools --dry-run
+
+      - name: Publish
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: cargo publish
