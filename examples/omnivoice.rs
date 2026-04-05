@@ -1,99 +1,105 @@
-// OmniVoice TTS example using the k2-fsa/OmniVoice Gradio space.
+// OmniVoice voice-cloning example using the k2-fsa/OmniVoice Gradio space.
 //
-// OmniVoice supports multilingual text-to-speech synthesis with a variety of
-// voice, style, pitch, and speed controls via /_design_fn, and voice cloning
-// from a reference audio file via /_clone_fn.
+// Clones a voice from a reference audio file and synthesises the supplied text.
+//
+// Usage:
+//   cargo run --example omnivoice -- -i ref.wav -t "Hello world"
+//   cargo run --example omnivoice -- -i ref.wav --text-file input.txt -o out.wav
+//   echo "Hello world" | cargo run --example omnivoice -- -i ref.wav
 //
 // Build note: the API spec is loaded from .gradio_cache/ so no network
-// connection is needed at compile time after the first build.
+// connection is needed at compile time.  Populate the cache with:
+//   cargo build --features gradio_macro/update_cache
 
+use std::path::PathBuf;
+use clap::Parser;
 use gradio_macro::gradio_api;
 
 #[gradio_api(url = "k2-fsa/OmniVoice", option = "async")]
 pub struct OmniVoice;
 
-/// Download a file returned by the API to a local path.
-async fn save_output(output: &gradio::PredictionOutput, path: &str) -> anyhow::Result<()> {
-    let file_data = output.clone().as_file()?;
-    let bytes = file_data.download(None).await?;
-    tokio::fs::write(path, bytes).await?;
-    println!("Saved: {}", path);
-    Ok(())
+/// Voice cloning with OmniVoice (k2-fsa/OmniVoice)
+#[derive(Parser, Debug)]
+#[command(about = "Clone a voice and synthesise speech with OmniVoice")]
+struct Args {
+    /// Reference audio file to clone the voice from (WAV / MP3)
+    #[arg(short, long, value_name = "FILE")]
+    input: PathBuf,
+
+    /// Output audio file path
+    #[arg(short, long, value_name = "FILE", default_value = "output.wav")]
+    output: String,
+
+    /// Text to synthesise (mutually exclusive with --text-file; reads stdin if neither is set)
+    #[arg(short, long, conflicts_with = "text_file")]
+    text: Option<String>,
+
+    /// Path to a plain-text file whose contents are synthesised
+    #[arg(long, value_name = "FILE", conflicts_with = "text")]
+    text_file: Option<PathBuf>,
+
+    /// Language for synthesis (default: Auto — model auto-detects)
+    #[arg(long, default_value = "Auto")]
+    language: String,
+
+    /// Transcript of the reference audio (helps the model clone the voice)
+    #[arg(long, default_value = "")]
+    ref_text: String,
+}
+
+/// Resolve the synthesis text from CLI args or stdin.
+async fn resolve_text(args: &Args) -> anyhow::Result<String> {
+    if let Some(ref t) = args.text {
+        return Ok(t.clone());
+    }
+    if let Some(ref path) = args.text_file {
+        return Ok(tokio::fs::read_to_string(path).await?);
+    }
+    // Fall back to stdin
+    use tokio::io::AsyncReadExt as _;
+    let mut buf = String::new();
+    tokio::io::stdin().read_to_string(&mut buf).await?;
+    Ok(buf.trim_end_matches('\n').to_string())
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    println!("OmniVoice – multilingual TTS & voice cloning");
+    let args = Args::parse();
 
-    // Build a client for the OmniVoice space
-    let omni = OmniVoice::new().await?;
-
-    // ── Example 1: basic text-to-speech ─────────────────────────────────
-    println!("\n[1] Synthesising English text …");
-    let result = omni
-        .design_fn(
-            "Hello, this is a demonstration of OmniVoice.",
-            // Language (defaults to "Auto" — let the model detect)
-            "Auto",
-            // Noise scale
-            32.0_f64,
-            // GS (speaking pace scale)
-            2.0_f64,
-            // Denoise
-            true,
-            // Speaking speed
-            1.0_f64,
-            // Duration (None / 0 means auto)
-            0.0_f64,
-            // Pause at punctuation
-            true,
-            // Post-processing
-            true,
-            // Gender
-            "Auto",
-            // Age
-            "Auto",
-            // Pitch
-            "Auto",
-            // Style
-            "Auto",
-            // Accent
-            "Auto",
-            // Dialect
-            "Auto",
-        )
-        .await?;
-
-    // Result[0] is the audio file, result[1] is a status string
-    save_output(&result[0], "omnivoice_tts.wav").await?;
-
-    if let Some(out) = result.get(1) {
-        if let Ok(status) = out.clone().as_value() {
-            println!("Status: {}", status);
-        }
+    let text = resolve_text(&args).await?;
+    if text.is_empty() {
+        anyhow::bail!("No text provided. Use --text, --text-file, or pipe text via stdin.");
     }
 
-    // ── Example 2: voice cloning (requires a reference .wav file) ────────
-    // Uncomment and provide a reference audio file to try voice cloning.
+    println!("Connecting to OmniVoice …");
+    let omni = OmniVoice::new().await?;
+
+    println!("Cloning voice from '{}' …", args.input.display());
+
+    // The builder API:
+    //   clone_fn(text, ref_audio)          <- mandatory params
+    //     .with_language(...)              <- optional (default: Auto)
+    //     .with_ref_text(...)              <- optional (default: "")
+    //     .call().await?
     //
-    // println!("\n[2] Cloning voice from reference audio …");
-    // let ref_audio = std::path::PathBuf::from("wavs/your_reference.wav");
-    // let clone_result = omni
-    //     .clone_fn(
-    //         "Cloning this voice in a new sentence.",
-    //         "Auto",                   // language (auto-detect)
-    //         ref_audio,                // reference audio
-    //         "Your reference text.",   // transcript of the reference audio
-    //         32.0_f64,                 // noise scale
-    //         2.0_f64,                  // gs
-    //         true,                     // denoise
-    //         1.0_f64,                  // speaking speed
-    //         0.0_f64,                  // duration (0 = auto)
-    //         true,                     // pause at punctuation
-    //         true,                     // post-process
-    //     )
-    //     .await?;
-    // save_output(&clone_result[0], "omnivoice_clone.wav").await?;
+    // Language is a typed enum generated from the Gradio API spec.
+    // Parse the CLI string via its Deserialize impl so any valid variant works.
+    let language_enum: OmniVoiceCloneFnLanguage =
+        serde_json::from_str(&format!("\"{}\"", args.language))
+            .unwrap_or(OmniVoiceCloneFnLanguage::Auto);
+
+    let result = omni
+        .clone_fn(text, &args.input)
+        .with_language(language_enum)
+        .with_ref_text(args.ref_text.clone())
+        .call()
+        .await?;
+
+    // result[0] is the synthesised audio file
+    let file_data = result[0].clone().as_file()?;
+    let bytes = file_data.download(None).await?;
+    tokio::fs::write(&args.output, bytes).await?;
+    println!("Saved: {}", args.output);
 
     Ok(())
 }

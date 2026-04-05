@@ -89,6 +89,7 @@ struct CacheEntry {
 }
 
 /// Load the API info from the local cache file, if present and valid.
+#[cfg(not(feature = "update_cache"))]
 fn load_api_from_cache(url: &str) -> Option<gradio::structs::ApiInfo> {
     let path = get_cache_path(url);
     if path.exists() {
@@ -105,7 +106,7 @@ fn load_api_from_cache(url: &str) -> Option<gradio::structs::ApiInfo> {
 }
 
 /// Persist the API info to the local cache file.
-#[cfg_attr(not(feature = "update_cache"), allow(dead_code))]
+#[cfg(feature = "update_cache")]
 fn save_api_to_cache(url: &str, api: &gradio::structs::ApiInfo) {
     let path = get_cache_path(url);
     if let Some(parent) = path.parent() {
@@ -127,6 +128,7 @@ fn save_api_to_cache(url: &str, api: &gradio::structs::ApiInfo) {
 
 /// Returns the age of the cache for `url` in seconds, or `None` if
 /// there is no cache entry or its timestamp cannot be read.
+#[cfg(not(feature = "update_cache"))]
 fn get_cache_age_secs(url: &str) -> Option<u64> {
     let path = get_cache_path(url);
     let content = std::fs::read_to_string(path).ok()?;
