@@ -61,9 +61,9 @@ The macro generates the `WhisperLarge` struct and all its methods automatically 
 - Each named API endpoint becomes a method on the struct.
 - Endpoints with **optional parameters** (those with API-level defaults) generate a builder:
   ```rust
-  whisper.predict("audio.wav")             // mandatory params only
-      .with_task("translate")              // optional setter
-      .call().await?                       // execute
+  whisper.predict("audio.wav")                          // mandatory params only
+      .with_task(WhisperLargePredictTask::Translate)    // optional setter (typed enum)
+      .call().await?                                    // execute
   ```
   Endpoints with only mandatory parameters are called directly.
 - `Literal[...]` Python types become typed Rust **enums** (e.g. `WhisperLargePredictTask::Transcribe`), providing compile-time safety instead of runtime string validation.

@@ -21,10 +21,6 @@ struct Args {
     #[arg(short, long, value_name = "FILE")]
     input: String,
 
-    /// Separation model (default: BS-RoFormer)
-    #[arg(long, default_value = "BS-RoFormer")]
-    model: String,
-
     /// Output file for the vocals track (default: vocals.wav)
     #[arg(long, default_value = "vocals.wav")]
     vocals: String,
@@ -46,11 +42,11 @@ async fn main() {
     println!("Vocal Separation");
     let vocal = VocalSeparation::new().await.unwrap();
 
-    // `separate` may have optional parameters depending on the API spec.
-    // If it returns a builder, call .call_background() / .call();
-    // otherwise call it directly.
+    // `separate` has optional parameters (model choice, etc.) – use the builder.
+    // Call .call().await to execute with default optional params.
     let result = vocal
-        .separate(&args.input, &args.model)
+        .separate(&args.input)
+        .call()
         .await
         .expect("Failed to separate vocals");
 

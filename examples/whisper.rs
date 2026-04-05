@@ -90,11 +90,16 @@ async fn main() {
     println!("Whisper large-v3-turbo");
     let whisper = WhisperLarge::new().await.unwrap();
 
-    // `predict` has an optional `task` parameter, so a builder is returned.
-    // Use .with_task() to override the default ("transcribe").
+    // `predict` has an optional `task` parameter (Literal enum), so a builder is returned.
+    // Parse the CLI string into the generated typed enum via its FromStr impl.
+    let task: WhisperLargePredictTask = args.task
+        .parse()
+        .unwrap_or_else(|_| panic!("invalid task '{}'; expected \"transcribe\" or \"translate\"", args.task));
+
+    // Use .with_task() to override the default.
     let mut stream = whisper
         .predict(&args.input)
-        .with_task(args.task)
+        .with_task(task)
         .call_background()
         .await
         .unwrap();

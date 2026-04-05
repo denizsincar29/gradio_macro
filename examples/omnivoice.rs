@@ -76,22 +76,25 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Cloning voice from '{}' …", args.input.display());
 
-    // The builder API:
-    //   clone_fn(text, ref_audio)          <- mandatory params
-    //     .with_language(...)              <- optional (default: Auto)
-    //     .with_ref_text(...)              <- optional (default: "")
+    // The builder API for the /_clone_fn endpoint:
+    //   clone_fn(text, ref_aud, ref_text, du)  <- mandatory params
+    //     .with_lang(...)                       <- optional (default: Auto)
     //     .call().await?
     //
-    // Language is a typed enum generated from the Gradio API spec.
-    // Parse the CLI string via its Deserialize impl so any valid variant works.
-    let language_enum: OmniVoiceCloneFnLanguage =
-        serde_json::from_str(&format!("\"{}\"", args.language))
-            .unwrap_or(OmniVoiceCloneFnLanguage::Auto);
+    // `lang` is a typed enum generated from the Gradio API spec.
+    // Parse the CLI string via its FromStr impl.
+    let language_enum: OmniVoiceCloneFnLang = args.language
+        .parse()
+        .unwrap_or(OmniVoiceCloneFnLang::Auto);
 
     let result = omni
-        .clone_fn(text, &args.input)
-        .with_language(language_enum)
-        .with_ref_text(args.ref_text.clone())
+        .clone_fn(
+            text,
+            &args.input,            // ref_aud: reference audio file
+            args.ref_text.clone(),  // ref_text: transcript of the reference audio
+            0.0_f64,                // du: duration (0.0 = auto-detect)
+        )
+        .with_lang(language_enum)
         .call()
         .await?;
 

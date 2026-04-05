@@ -259,8 +259,22 @@ fn map_type(
         if !enum_type_name.is_empty() {
             // Generate a typed enum instead of runtime validation
             let enum_ident = Ident::new(enum_type_name, Span::call_site());
+
+            // Deduplicate variant names: if safe_variant_ident produces the same
+            // identifier for different strings (e.g. non-ASCII chars all → "Variant"),
+            // append a numeric suffix (Variant2, Variant3, …).
+            let mut used_names: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
             let variant_idents: Vec<Ident> = variants.iter()
-                .map(|s| safe_variant_ident(s, "Variant"))
+                .map(|s| {
+                    let base = safe_variant_ident(s, "Variant").to_string();
+                    let count = used_names.entry(base.clone()).or_insert(0);
+                    *count += 1;
+                    if *count == 1 {
+                        Ident::new(&base, Span::call_site())
+                    } else {
+                        Ident::new(&format!("{}{}", base, count), Span::call_site())
+                    }
+                })
                 .collect();
 
             let enum_def = quote! {
@@ -285,10 +299,20 @@ fn map_type(
 
                 impl<'de> gradio::serde::Deserialize<'de> for #enum_ident {
                     fn deserialize<D: gradio::serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                        let s = String::deserialize(deserializer)?;
+                        let s = <String as gradio::serde::Deserialize<'de>>::deserialize(deserializer)?;
                         match s.as_str() {
                             #(#variant_strs => Ok(Self::#variant_idents),)*
                             _ => Err(gradio::serde::de::Error::custom(format!("unknown variant: {}", s))),
+                        }
+                    }
+                }
+
+                impl std::str::FromStr for #enum_ident {
+                    type Err = String;
+                    fn from_str(s: &str) -> Result<Self, Self::Err> {
+                        match s {
+                            #(#variant_strs => Ok(Self::#variant_idents),)*
+                            _ => Err(format!("unknown variant for {}: {}", stringify!(#enum_ident), s)),
                         }
                     }
                 }
@@ -502,7 +526,13 @@ fn make_default_expr(
     variant_strs: Option<&[String]>,
 ) -> proc_macro2::TokenStream {
     if is_file {
-        return quote! { std::path::PathBuf::new() };
+        return match default_value {
+            Some(serde_json::Value::String(s)) => {
+                let s = s.clone();
+                quote! { std::path::PathBuf::from(#s) }
+            }
+            _ => quote! { std::path::PathBuf::new() },
+        };
     }
     // Literal / enum
     if let (Some(eid), Some(vstrs)) = (enum_ident, variant_strs) {
@@ -536,13 +566,15 @@ fn make_default_expr(
             }
         },
         Some(serde_json::Value::Bool(b)) => quote! { #b },
-        _ => match python_type {
+        Some(serde_json::Value::Null) => quote! { serde_json::Value::Null },
+        None => match python_type {
             "str" => quote! { String::new() },
             "float" => quote! { 0.0_f64 },
             "int" => quote! { 0_i64 },
             "bool" => quote! { false },
             _ => quote! { serde_json::Value::Null },
         },
+        _ => quote! { serde_json::Value::Null },
     }
 }
 
