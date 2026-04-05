@@ -1,18 +1,19 @@
 # gradio_macro_test
 
-a simple macro that generates api code for gradio rust crate.
+A macro that generates type-safe API client code for Gradio Rust crate endpoints at compile time.
 
 ## Usage
 
-First, to run the macro, you need to have the gradio_macro crate in your project.
+Add the crates to your project:
 
 ```toml
 [dependencies]
-gradio_macro = "0.2"
+gradio_macro = "0.4"
 gradio = "0.3"
 ```
 
-Then, you can use the macro in your code like this.
+Then use the macro in your code:
+
 ```rust
 use gradio_macro::gradio_api;
 use std::fs;
@@ -42,32 +43,59 @@ async fn main() {
 
 This example demonstrates how to define an asynchronous API client using the `gradio_api` macro to interact with the `hf-audio/whisper-large-v3-turbo` Gradio model.
 
-### explanation
+### Macro parameters
 
-In this example, the macro defines the WhisperLarge struct, which can be used to send requests to the API. The macro also generates methods for each API endpoint based on the provided URL.
-- The predict method in this case is used to send an audio file (wavs/english.wav) to the API for transcription.
-- The API responds with the transcription, which is then written to result.txt.
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `url` | ✅ | HuggingFace space identifier or full Gradio URL |
+| `option` | ✅ | `"sync"` or `"async"` |
+| `hf_token` | ❌ | HuggingFace API token |
+| `auth_username` | ❌ | HuggingFace username (pair with `auth_password`) |
+| `auth_password` | ❌ | HuggingFace password (pair with `auth_username`) |
+| `cache` | ❌ | Set to `"refresh"` to bypass the local cache and re-fetch the API spec |
+
+### Explanation
+
+The macro generates the `WhisperLarge` struct and all its methods automatically from the live Gradio API spec:
+
+- Each named API endpoint becomes a method on the struct.
+- A `_background` variant of every method returns a streaming `PredictionStream` handle instead of blocking.
+- Parameter types are derived from the full Gradio API spec (`f64` for `float`, `i64` for `int`, `bool` for `bool`, `impl Into<std::path::PathBuf>` for file inputs, `impl Into<String>` for strings).
+- Every generated method is documented with parameter names, types, descriptions and return-value information taken directly from the Gradio API spec – your IDE will show this information in hover tooltips.
+
+## API caching
+
+The first build fetches the API spec from the Gradio server and saves it to `.gradio_cache/<url>.json` in your project root. Subsequent builds load the spec from the cache without making any network request.
+
+### Refreshing the cache
+
+**Option 1 – environment variable (refreshes all cached specs):**
+```bash
+GRADIO_REFRESH_API_CACHE=1 cargo build
+```
+
+**Option 2 – macro argument (refreshes only the annotated struct):**
+```rust
+#[gradio_api(url = "hf-audio/whisper-large-v3-turbo", option = "async", cache = "refresh")]
+pub struct WhisperLarge;
+```
+
+### Committing the cache
+
+You may commit the `.gradio_cache/` directory to version control for fully reproducible, offline-capable builds.  To always fetch a fresh spec instead, add `.gradio_cache/` to your `.gitignore`.
 
 ## How it works
 
-The struct uses the [gradio](https://crates.io/crates/gradio) crate to generate the api struct.
-The #[gradio_api(...)] attribute macro generates the struct for you, so you don't need to write it yourself.
-- The #[gradio_api(...)] attribute has two arguments: url and option, and 3 optional string arguments: hf_token, auth_username and auth_password for authorization on huggingface (experimental).
-- url can be either a full URL or a simple Hugging Face space identifier.
-- option can be "sync" or "async", depending on the nature of your codebase.
-- hf_token (optional) - huggingface token.
-- auth_username and auth_password (optional) - your huggingface credentials.
-- The methods of the struct are snake_cased versions of the API endpoint names, with an optional _background suffix for methods that are run in the background using async tasks.
-- The argument names are derived from the API spec.
-
+The `#[gradio_api(...)]` attribute macro calls the [gradio](https://crates.io/crates/gradio) Rust crate at compile time to introspect the target Gradio space and generate a bespoke client struct.
 
 ## Limitations
 
-- The prediction outputs are somewhat complex to handle due to their dynamic nature. The macro currently uses serde_json to manage the outputs, but this can be improved in future versions.
+- Prediction outputs are `Vec<gradio::PredictionOutput>` (dynamically typed).  Extract values with `.as_value()` or `.as_file()`.
+- Complex input types (lists, dicts, etc.) fall back to `impl gradio::serde::Serialize`.
 
 ## Credits
 
-Big Thanks to [Jacob Lin](https://github.com/JacobLinCool) for the idea and assistance.
+Big Thanks to [Jacob Lin](https://github.com/JacobLinCool) for the [gradio-rs](https://github.com/JacobLinCool/gradio-rs) crate and assistance.
 
 ## Notes
 
