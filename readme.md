@@ -173,6 +173,3 @@ The `#[gradio_api(...)]` and `#[gradio_cli(...)]` attribute macros call the [gra
 
 Big Thanks to [Jacob Lin](https://github.com/JacobLinCool) for the [gradio-rs](https://github.com/JacobLinCool/gradio-rs) crate and assistance.
 
-## Notes
-
-The sounds folder in the repository contains a .wav version of a video from the YouTube channel Fireship, covering the latest tech news/code report. This file, named english.wav, is provided for voice recognition testing. If you believe this constitutes copyright infringement, please kindly open an issue, and I will replace it.
