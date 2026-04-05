@@ -18,13 +18,14 @@ heck = "0.5.0"
 regex = { version = "1", optional = true }
 proc-macro2 = "1.0"
 quote = "1.0.37"
-serde = "1.0.209"
+serde = { version = "1.0.209", features = ["derive"] }
 serde_json = "1.0.127"
 syn = "2.0.76"
 tokio = { version = "1", features = ["full"], optional = true }
 
 [features]
 default = []
+update_cache = []
 # Enable to build the `gradio_cache_update` binary.
 cli-tools = ["clap", "tokio", "regex"]
 
