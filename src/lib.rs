@@ -159,9 +159,10 @@ fn get_api_info(url: &str, opts: ClientOptions) -> Result<gradio::structs::ApiIn
         match load_api_from_cache(url) {
             Some(api) => {
                 if let Some(age) = get_cache_age_secs(url) {
-                    const SEVEN_DAYS_SECS: u64 = 7 * 24 * 3600;
+                    const SECS_PER_DAY: u64 = 24 * 3600;
+                    const SEVEN_DAYS_SECS: u64 = 7 * SECS_PER_DAY;
                     if age > SEVEN_DAYS_SECS {
-                        let days = age / 86400;
+                        let days = age / SECS_PER_DAY;
                         eprintln!(
                             "gradio_macro: cache for '{}' is {} day(s) old – \
                              run `cargo build --features gradio_macro/update_cache` to refresh",
