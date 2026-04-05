@@ -29,8 +29,9 @@ async fn main() {
     // Instantiate the API client
     let whisper = WhisperLarge::new().await.unwrap();
 
-    // Call the API's predict method with input arguments
-    let result = whisper.predict("wavs/english.wav", "transcribe").await.unwrap();
+    // Call the API's predict method.
+    // `task` is optional (default: "transcribe"), so a builder is generated:
+    let result = whisper.predict("wavs/english.wav").call().await.unwrap();
 
     // Handle the result
     let result = result[0].clone().as_value().unwrap();
@@ -52,62 +53,42 @@ This example demonstrates how to define an asynchronous API client using the `gr
 | `hf_token` | ❌ | HuggingFace API token |
 | `auth_username` | ❌ | HuggingFace username (pair with `auth_password`) |
 | `auth_password` | ❌ | HuggingFace password (pair with `auth_username`) |
-| `cache` | ❌ | Set to `"refresh"` to bypass the local cache and re-fetch the API spec |
 
 ### Explanation
 
 The macro generates the `WhisperLarge` struct and all its methods automatically from the live Gradio API spec:
 
 - Each named API endpoint becomes a method on the struct.
-- A `_background` variant of every method returns a streaming `PredictionStream` handle instead of blocking.
+- Endpoints with **optional parameters** (those with API-level defaults) generate a builder:
+  ```rust
+  whisper.predict("audio.wav")             // mandatory params only
+      .with_task("translate")              // optional setter
+      .call().await?                       // execute
+  ```
+  Endpoints with only mandatory parameters are called directly.
+- `Literal[...]` Python types become typed Rust **enums** (e.g. `WhisperLargePredictTask::Transcribe`), providing compile-time safety instead of runtime string validation.
 - Parameter types are derived from the full Gradio API spec (`f64` for `float`, `i64` for `int`, `bool` for `bool`, `impl Into<std::path::PathBuf>` for file inputs, `impl Into<String>` for strings).
+- A `_background` variant of every direct method (or `call_background()` on a builder) returns a streaming `PredictionStream` handle instead of blocking.
 - Every generated method is documented with parameter names, types, descriptions and return-value information taken directly from the Gradio API spec – your IDE will show this information in hover tooltips.
 
 ## API caching
 
-The first build fetches the API spec from the Gradio server and saves it to `.gradio_cache/<url>.json` in your project root. Subsequent builds load the spec from the cache without making any network request.
+The macro spec from the Gradio server is cached in `.gradio_cache/<url>.json` in your project root.
+Subsequent builds load the spec from the cache without making any network request, so **VS Code / rust-analyzer will not hang**.
 
-### Refreshing the cache with the CLI tool
+### Populating and refreshing the cache
 
-Install the `gradio_cache_update` binary once (the `cli-tools` feature enables the binary deps):
-
-```bash
-cargo install gradio_macro --features cli-tools
-```
-
-Then, from your project root, update all caches automatically:
+Enable the `update_cache` feature to fetch fresh specs from the network and write them to `.gradio_cache/`:
 
 ```bash
-# Auto-scan the current project and refresh every cached spec
-gradio_cache_update
+# First-time setup or cache refresh:
+cargo build --features gradio_macro/update_cache
 
-# Cache specific spaces directly
-gradio_cache_update hf-audio/whisper-large-v3-turbo jacoblincool/vocal-separation
-
-# Scan a different directory
-gradio_cache_update --scan path/to/other/project
-
-# Write cache files to a custom directory
-gradio_cache_update --output-dir my_cache
-
-# Authenticate with HuggingFace for private spaces
-gradio_cache_update --hf-token hf_...
-# or via env var
-HF_TOKEN=hf_... gradio_cache_update
+# For private spaces, pass a token via the environment:
+HF_TOKEN=hf_... cargo build --features gradio_macro/update_cache
 ```
 
-### Other ways to refresh the cache
-
-**Environment variable (refreshes all cached specs at build time):**
-```bash
-GRADIO_REFRESH_API_CACHE=1 cargo build
-```
-
-**Macro argument (refreshes only the annotated struct):**
-```rust
-#[gradio_api(url = "hf-audio/whisper-large-v3-turbo", option = "async", cache = "refresh")]
-pub struct WhisperLarge;
-```
+Without this feature, the macro **only** reads the local cache. If no cache is present the build fails with a clear error message pointing at this command. If the cache is older than 7 days a warning is printed.
 
 ### Committing the cache
 
@@ -158,7 +139,8 @@ Options:
 ```
 
 `Literal[...]` Python types are automatically mapped to clap `possible_values`, giving
-built-in validation and shell completions for free.
+built-in validation and shell completions for free.  When used via `gradio_api` they
+become typed Rust enums for compile-time safety.
 
 ## How it works
 
