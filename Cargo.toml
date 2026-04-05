@@ -12,32 +12,26 @@ exclude = ["wavs/"]
 
 [dependencies]
 anyhow = "1.0.86"
-clap = { version = "4", features = ["derive", "env"], optional = true }
 gradio = "0.3.2"
 heck = "0.5.0"
-regex = { version = "1", optional = true }
 proc-macro2 = "1.0"
 quote = "1.0.37"
-serde = "1.0.209"
-serde_json = "1.0.127"
-syn = "2.0.76"
-tokio = { version = "1", features = ["full"], optional = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+syn = "2.0"
 
 [features]
 default = []
-# Enable to build the `gradio_cache_update` binary.
-cli-tools = ["clap", "tokio", "regex"]
+# Fetch fresh API specs from the network and update the local cache.
+# Use when the cache is missing or outdated:
+#   cargo build --features gradio_macro/update_cache
+update_cache = []
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
-anyhow = "1.0.86"
+anyhow = "1.0"
 
 [lib]
 proc-macro = true
-
-[[bin]]
-name = "gradio_cache_update"
-path = "src/bin/gradio_cache_update.rs"
-required-features = ["cli-tools"]
 

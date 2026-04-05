@@ -1,36 +1,55 @@
-// This is a simple example of how to use the generated API
-// The api is generated in compile time, iliminating the need to learn the API and the need to write the boilerplate code
-// One simple macro fetches the api using the gradio crate and generates the api for you.
-// notice 1: You need to be online to build the project for the first time, because the macro fetches the api from the server.
-// notice 2: for some reason, the macro relies on serde and serde_json crate, so cargo add them to the project where you use the macro.
-// we highly recommend to use an IDE that supports rust analyzer to determin the api struct methods since the api is generated in compile time.
+// Whisper large-v3-turbo transcription/translation example.
+//
+// Streams progress to the terminal and writes the result to a file.
+//
+// Build note: populate the cache first:
+//   cargo build --features gradio_macro/update_cache
+//
+// Usage:
+//   cargo run --example whisper -- -i audio.wav
+//   cargo run --example whisper -- -i audio.wav --task translate -o result.txt
 
 use std::fs;
 
+use clap::Parser;
 use gradio::{structs::QueueDataMessage, PredictionOutput, PredictionStream};
 use gradio_macro::gradio_api;
 
-
-// The macro generates the api struct for you, so you don't need to write the struct yourself.
 #[gradio_api(url = "hf-audio/whisper-large-v3-turbo", option = "async")]
 pub struct WhisperLarge;
+
+/// Whisper large-v3-turbo: transcribe or translate an audio file.
+#[derive(Parser, Debug)]
+#[command(about = "Transcribe or translate audio with Whisper large-v3-turbo")]
+struct Args {
+    /// Audio file to process
+    #[arg(short, long, value_name = "FILE")]
+    input: String,
+
+    /// Task: "transcribe" (default) or "translate"
+    #[arg(long, default_value = "transcribe")]
+    task: String,
+
+    /// Output file for the result (default: result.txt)
+    #[arg(short, long, default_value = "result.txt")]
+    output: String,
+}
 
 pub async fn show_progress(stream: &mut PredictionStream) -> Option<Vec<PredictionOutput>> {
     while let Some(message) = stream.next().await {
         if let Err(val) = message {
             eprintln!("Error: {:?}", val);
             continue;
-            // return None;  // skip the error and continue
         }
         match message.unwrap() {
             QueueDataMessage::Open => println!("Task started"),
             QueueDataMessage::Progress { event_id: _, eta, progress_data } => {
-                println!("Processing: (ETA: {:?})", eta);
-                if let Some(progress_data) = progress_data {
-                    let progress_data = &progress_data[0];
-                    println!("Progress: {:?} / {:?} {:?}", progress_data.index+1, progress_data.length.unwrap_or(0), progress_data.unit);
+                println!("Processing (ETA: {:?})", eta);
+                if let Some(pd) = progress_data {
+                    let p = &pd[0];
+                    println!("  {}/{} {:?}", p.index + 1, p.length.unwrap_or(0), p.unit);
                 }
-            },
+            }
             QueueDataMessage::ProcessCompleted { event_id: _, output, success } => {
                 if !success {
                     eprintln!("Failed");
@@ -38,51 +57,61 @@ pub async fn show_progress(stream: &mut PredictionStream) -> Option<Vec<Predicti
                 }
                 println!("Completed!");
                 return Some(output.try_into().unwrap());
-            },
-            QueueDataMessage::Heartbeat => {},  // my heart is beating, don't worry
+            }
+            QueueDataMessage::Heartbeat => {}
             QueueDataMessage::Estimation { event_id: _, rank, queue_size, rank_eta } => {
-                println!("In queue: {}/{} (ETA: {:?})", rank+1, queue_size, rank_eta);
-            },
+                println!("In queue: {}/{} (ETA: {:?})", rank + 1, queue_size, rank_eta);
+            }
             QueueDataMessage::Log { event_id } => {
-                println!("Log: {}", event_id.unwrap_or("_".to_string()));
-            },
+                println!("Log: {}", event_id.unwrap_or_default());
+            }
             QueueDataMessage::ProcessStarts { event_id: _, eta, progress_data } => {
-                println!("Processing: (ETA: {:?})", eta);
-                if let Some(progress_data) = progress_data {
-                    let progress_data = &progress_data[0];
-                    println!("Progress: {:?} / {:?} {:?}", progress_data.index+1, progress_data.length.unwrap_or(0), progress_data.unit);
+                println!("Processing (ETA: {:?})", eta);
+                if let Some(pd) = progress_data {
+                    let p = &pd[0];
+                    println!("  {}/{} {:?}", p.index + 1, p.length.unwrap_or(0), p.unit);
                 }
-            },
+            }
             QueueDataMessage::UnexpectedError { message } => {
-                eprintln!("Unexpected error: {}", message.unwrap_or("_".to_string()));
-                // return None;  // don't, lets end the loop and see if it will retry.
-            },
+                eprintln!("Unexpected error: {}", message.unwrap_or_default());
+            }
             QueueDataMessage::Unknown(m) => {
-                eprintln!("[warning] Skipping unknown message: {:?}", m);
-            },
+                eprintln!("[warning] Unknown message: {:?}", m);
+            }
         }
     }
     None
 }
 
-// Dear kids, if you don't know what the capital of japan is doing in the code, it's a little thingy to run async functions.
 #[tokio::main]
 async fn main() {
-    println!("Whisper Large V3 turbo");
-    let whisper= WhisperLarge::new().await.unwrap();
-    // warning! This video, rust in 100 seconds, is somewhere transcribed incorrectly by whisper-jax, especially the name of the rust founder.
-    let mut result=whisper.predict_background("wavs/english.wav", "transcribe").await.unwrap();
-    let result=show_progress(&mut result).await;
-    match &result {
+    let args = Args::parse();
+
+    println!("Whisper large-v3-turbo");
+    let whisper = WhisperLarge::new().await.unwrap();
+
+    // `predict` has an optional `task` parameter (Literal enum), so a builder is returned.
+    // Parse the CLI string into the generated typed enum via its FromStr impl.
+    let task: WhisperLargePredictTask = args.task
+        .parse()
+        .unwrap_or_else(|_| panic!("invalid task '{}'; expected \"transcribe\" or \"translate\"", args.task));
+
+    // Use .with_task() to override the default.
+    let mut stream = whisper
+        .predict(&args.input)
+        .with_task(task)
+        .call_background()
+        .await
+        .unwrap();
+
+    match show_progress(&mut stream).await {
         Some(result) => {
-            let result=result[0].clone().as_value().unwrap();
-            fs::write("result.txt", format!("{}", result)).expect("Can't write to file");
-            println!("result written to result.txt");
-        },
+            let text = result[0].clone().as_value().unwrap();
+            fs::write(&args.output, format!("{}", text)).expect("Can't write to file");
+            println!("Result written to {}", args.output);
+        }
         None => {
-            println!("Failed to transcribe");
+            eprintln!("Failed to transcribe");
         }
     }
-    
-
 }

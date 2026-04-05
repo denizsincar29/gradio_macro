@@ -370,7 +370,6 @@ dependencies = [
  "heck",
  "proc-macro2",
  "quote",
- "regex",
  "serde",
  "serde_json",
  "syn",
