@@ -5,3 +5,5 @@
 4. All endpoints, including the .custom_endpoint(), should return a builder that has call and call_background methods. There must not be .endpointname and .endpointname_background methods.
 5. Rewrite some long running examples to use background method and print queue messages.
 6. Test all examples and check if they not spam the console. Update the queue and progress messages intelligently with same line editing / clear line. Rewrite example audio generator for the new format of thiserror and background and test it.
+7. Bump the version.
+8. Update the readme with new changes / new format of library usage. Make good dock comments for docs.rs to explain the library and its usage. Add examples to the docs.rs documentation. Make sure the readme is clear and concise and has good examples for users to understand how to use the library.
