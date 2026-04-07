@@ -868,17 +868,21 @@ pub(crate) fn build_check_cache_method(
             // Save the fresh spec to the local cache file so the next
             // `cargo build --features gradio_macro/update_cache` picks it up.
             {
-                let cache_dir = std::path::PathBuf::from(
-                    std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()),
-                )
-                .join(".gradio_cache");
+                // env!("CARGO_MANIFEST_DIR") is expanded at compile time of the consuming
+                // crate, giving the crate root that the proc-macro also uses for its cache
+                // lookup.  This is more reliable than std::env::var() which is typically
+                // unset at runtime.
+                let cache_dir =
+                    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".gradio_cache");
                 let _ = std::fs::create_dir_all(&cache_dir);
                 let cache_path = cache_dir.join(format!("{}.json", __ENCODED_URL));
                 let timestamp_secs = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                if let Ok(api_value) = serde_json::to_value(&fresh_api.named_endpoints) {
+                // Serialize the full ApiInfo (not just named_endpoints) so that
+                // load_api_from_cache() can deserialize it back correctly.
+                if let Ok(api_value) = serde_json::to_value(&fresh_api) {
                     let envelope = serde_json::json!({
                         "timestamp_secs": timestamp_secs,
                         "api": api_value,

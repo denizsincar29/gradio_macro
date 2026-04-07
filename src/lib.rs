@@ -6,7 +6,7 @@
 //! ## Macros
 //!
 //! - [`gradio_api`] — generates a fully-typed struct with builder methods for every named
-//!   endpoint, plus a [`check_cache()`] helper for detecting upstream API spec changes during
+//!   endpoint, plus a `check_cache()` helper (debug builds only) for detecting upstream API spec changes during
 //!   development.
 //! - [`gradio_cli`] — generates a [`clap::Parser`]-based CLI struct from the same spec.
 //!
@@ -86,14 +86,16 @@ pub(crate) fn make_compile_error(message: &str) -> TokenStream {
 /// async fn main() -> anyhow::Result<()> {
 ///     let whisper = WhisperLarge::new().await?;
 ///
-///     // .call_cli() pretty-prints progress to stderr, then returns the result.
+///     // .call_cli() pretty-prints progress to stderr, then returns the typed output struct.
+///     // Field names match the Gradio API spec; use `whisper.api()` to see all fields.
 ///     let result = whisper
 ///         .predict("audio.wav")
 ///         .with_task(WhisperLargePredictTask::Transcribe)
 ///         .call_cli()
 ///         .await?;
 ///
-///     println!("{}", result[0].clone().as_value()?);
+///     // `result.output` is a `serde_json::Value` holding the transcription text.
+///     println!("{}", result.output);
 ///     Ok(())
 /// }
 /// ```

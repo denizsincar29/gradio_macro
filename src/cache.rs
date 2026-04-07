@@ -3,9 +3,9 @@ use gradio::ClientOptions;
 /// Returns the path to the cache file for the given URL.
 /// The cache is stored in `.gradio_cache/` relative to `CARGO_MANIFEST_DIR`.
 ///
-/// The filename encodes the URL by percent-encoding non-alphanumeric/dash/dot
-/// characters, which avoids collisions between URLs that only differ in
-/// separator characters (e.g. `a/b` vs `a_b`).
+/// The filename encodes the URL by percent-encoding non-alphanumeric
+/// characters except `-`, `_`, and `.`, which avoids collisions between URLs
+/// that only differ in separator characters (e.g. `a/b` vs `a_b`).
 pub(crate) fn get_cache_path(url: &str) -> std::path::PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let encoded: String = encode_url_for_cache(url);
