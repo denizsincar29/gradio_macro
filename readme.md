@@ -43,24 +43,30 @@ async fn main() -> anyhow::Result<()> {
 
 ### Builder API
 
-Every generated endpoint method returns a builder, regardless of whether it has optional parameters:
+Every generated endpoint method returns a builder, regardless of whether it has optional parameters.
+Each builder has three execute methods:
+
+| Method | Description |
+|--------|-------------|
+| `.call().await?` | Waits for the full result; no progress output |
+| `.call_background().await?` | Returns a `PredictionStream` — drive it yourself |
+| `.call_cli().await?` | Streams queue/progress to `stderr` on the same line, returns the full result |
 
 ```rust
-// Mandatory-only endpoint — still uses .call() / .call_background()
+// Mandatory-only endpoint
 client.encode("text").call().await?;
 
-// Endpoint with optional parameters — use .with_xxx() setters before calling
-whisper
-    .predict("audio.wav")
+// Endpoint with optional parameters — chain .with_xxx() setters
+whisper.predict("audio.wav")
     .with_task(WhisperLargePredictTask::Translate)
-    .call()
+    .call_cli()   // prints progress, then returns result
     .await?;
 ```
 
 ### Streaming with `call_background()`
 
-For long-running tasks, use `.call_background()` to receive a `PredictionStream` handle
-and process queue/progress messages in real time, using `\r` to update the same terminal line:
+For full control over queue/progress messages, use `.call_background()` to receive a
+`PredictionStream` handle and drive it yourself:
 
 ```rust
 use gradio::{structs::QueueDataMessage, PredictionStream};
@@ -115,7 +121,9 @@ let result = client
 The macro generates the struct and all its methods automatically from the Gradio API spec:
 
 - Each named API endpoint becomes a **factory method** on the struct that returns a **builder**.
-- The builder always exposes `.call()` (or `async fn call()`) and `.call_background()`.
+- The builder always exposes `.call()`, `.call_background()`, and `.call_cli()` (async only).
+  `.call_cli()` streams queue and progress messages to `stderr` on the same terminal line (`\r`
+  updates) and returns the completed outputs — no boilerplate needed in your code.
 - Endpoints with **optional parameters** (those with API-level defaults) expose `.with_xxx()` setter
   methods documented with the parameter description and default value.
 - `Literal[...]` Python types become typed Rust **enums**

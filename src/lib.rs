@@ -700,6 +700,8 @@ fn build_setter_doc(param: &gradio::structs::ApiData, index: usize) -> String {
 ///   - `.call()` — executes the prediction and returns `Vec<PredictionOutput>`.
 ///   - `.call_background()` — submits the prediction and returns a `PredictionStream` for
 ///     streaming queue/progress messages.
+///   - `.call_cli()` *(async only)* — submits, pretty-prints queue/progress to `stderr` on the
+///     same terminal line, then returns `Vec<PredictionOutput>`. No boilerplate needed.
 ///   - `.with_<param>()` setters for any **optional** parameters (those with API-level defaults).
 /// - Typed Rust enums for `Literal[...]` Python types, with `Display`, `Serialize`,
 ///   `Deserialize`, and `FromStr` implementations.
@@ -740,11 +742,11 @@ fn build_setter_doc(param: &gradio::structs::ApiData, index: usize) -> String {
 /// async fn main() -> anyhow::Result<()> {
 ///     let whisper = WhisperLarge::new().await?;
 ///
-///     // Every endpoint returns a builder — use .call() or .call_background()
+///     // .call_cli() pretty-prints progress to stderr, then returns the result.
 ///     let result = whisper
 ///         .predict("audio.wav")
 ///         .with_task(WhisperLargePredictTask::Transcribe)
-///         .call()
+///         .call_cli()
 ///         .await?;
 ///
 ///     println!("{}", result[0].clone().as_value()?);
@@ -752,7 +754,7 @@ fn build_setter_doc(param: &gradio::structs::ApiData, index: usize) -> String {
 /// }
 /// ```
 ///
-/// ## Streaming example
+/// ## Manual streaming with `call_background()`
 ///
 /// ```rust,ignore
 /// use gradio::{structs::QueueDataMessage, PredictionStream};
@@ -1064,6 +1066,70 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                     #(#validations)*
                     __builder_client.submit(#name, vec![#(#call_exprs),*]).await
                 }
+
+                /// Submit this request and pretty-print queue / progress messages to `stderr`,
+                /// then return the full output.
+                ///
+                /// Uses `\r` to update the same terminal line while the task is queued or
+                /// running, so the console stays clean. Equivalent to calling
+                /// `.call_background().await?` and driving the stream yourself.
+                pub async fn call_cli(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
+                    use gradio::structs::QueueDataMessage;
+                    let mut stream = self.call_background().await?;
+                    loop {
+                        match stream.next().await {
+                            None => {
+                                eprintln!();
+                                return Err(gradio::anyhow::anyhow!("stream ended without a result"));
+                            }
+                            Some(Err(e)) => {
+                                eprintln!("\r[error] {:?}                    ", e);
+                            }
+                            Some(Ok(msg)) => match msg {
+                                QueueDataMessage::Open => {
+                                    eprint!("\rConnected, waiting in queue…    ");
+                                }
+                                QueueDataMessage::Estimation { rank, queue_size, rank_eta, .. } => {
+                                    eprint!(
+                                        "\rQueue position {}/{} (ETA: {:.1}s)  ",
+                                        rank + 1,
+                                        queue_size,
+                                        rank_eta.unwrap_or(0.0)
+                                    );
+                                }
+                                QueueDataMessage::ProcessStarts { .. } => {
+                                    eprint!("\rProcessing…                          ");
+                                }
+                                QueueDataMessage::Progress { progress_data, .. } => {
+                                    if let Some(pd) = progress_data {
+                                        if let Some(p) = pd.first() {
+                                            eprint!(
+                                                "\rProgress: {}/{} {:?}    ",
+                                                p.index + 1,
+                                                p.length.unwrap_or(0),
+                                                p.unit
+                                            );
+                                        }
+                                    }
+                                }
+                                QueueDataMessage::ProcessCompleted { output, success, .. } => {
+                                    eprintln!();
+                                    if !success {
+                                        return Err(gradio::anyhow::anyhow!("prediction failed"));
+                                    }
+                                    return output.try_into().map_err(|e: gradio::anyhow::Error| e);
+                                }
+                                QueueDataMessage::Log { event_id } => {
+                                    eprint!("\rLog: {}              ", event_id.unwrap_or_default());
+                                }
+                                QueueDataMessage::UnexpectedError { message } => {
+                                    eprintln!("\r[unexpected error] {}              ", message.unwrap_or_default());
+                                }
+                                QueueDataMessage::Heartbeat | QueueDataMessage::Unknown(_) => {}
+                            },
+                        }
+                    }
+                }
             },
             Syncity::Sync => quote! {
                 /// Execute this request and return the full output.
@@ -1122,6 +1188,64 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                 /// Submit the custom endpoint and return a streaming handle.
                 pub async fn call_background(self) -> Result<gradio::PredictionStream, gradio::anyhow::Error> {
                     self.client.submit(&self.endpoint, self.arguments).await
+                }
+                /// Submit and pretty-print queue / progress messages to `stderr`, then return the full output.
+                pub async fn call_cli(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
+                    use gradio::structs::QueueDataMessage;
+                    let mut stream = self.call_background().await?;
+                    loop {
+                        match stream.next().await {
+                            None => {
+                                eprintln!();
+                                return Err(gradio::anyhow::anyhow!("stream ended without a result"));
+                            }
+                            Some(Err(e)) => {
+                                eprintln!("\r[error] {:?}                    ", e);
+                            }
+                            Some(Ok(msg)) => match msg {
+                                QueueDataMessage::Open => {
+                                    eprint!("\rConnected, waiting in queue…    ");
+                                }
+                                QueueDataMessage::Estimation { rank, queue_size, rank_eta, .. } => {
+                                    eprint!(
+                                        "\rQueue position {}/{} (ETA: {:.1}s)  ",
+                                        rank + 1,
+                                        queue_size,
+                                        rank_eta.unwrap_or(0.0)
+                                    );
+                                }
+                                QueueDataMessage::ProcessStarts { .. } => {
+                                    eprint!("\rProcessing…                          ");
+                                }
+                                QueueDataMessage::Progress { progress_data, .. } => {
+                                    if let Some(pd) = progress_data {
+                                        if let Some(p) = pd.first() {
+                                            eprint!(
+                                                "\rProgress: {}/{} {:?}    ",
+                                                p.index + 1,
+                                                p.length.unwrap_or(0),
+                                                p.unit
+                                            );
+                                        }
+                                    }
+                                }
+                                QueueDataMessage::ProcessCompleted { output, success, .. } => {
+                                    eprintln!();
+                                    if !success {
+                                        return Err(gradio::anyhow::anyhow!("prediction failed"));
+                                    }
+                                    return output.try_into().map_err(|e: gradio::anyhow::Error| e);
+                                }
+                                QueueDataMessage::Log { event_id } => {
+                                    eprint!("\rLog: {}              ", event_id.unwrap_or_default());
+                                }
+                                QueueDataMessage::UnexpectedError { message } => {
+                                    eprintln!("\r[unexpected error] {}              ", message.unwrap_or_default());
+                                }
+                                QueueDataMessage::Heartbeat | QueueDataMessage::Unknown(_) => {}
+                            },
+                        }
+                    }
                 }
             }
         },
