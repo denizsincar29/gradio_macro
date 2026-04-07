@@ -560,7 +560,7 @@ fn safe_ident(name: &str, fallback: &str) -> Ident {
         snake_cased
     };
     // If still empty after ASCII filtering, use positional fallback directly
-    // (positional fallbacks like "arg_0", "output_0" are already ASCII-safe).
+    // (positional fallbacks like "arg0", "output0" are already ASCII-safe).
     let with_fallback = if with_fallback.is_empty() {
         ascii_snake(fallback)
     } else {
