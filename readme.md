@@ -2,47 +2,110 @@
 
 A macro that generates type-safe API client code for Gradio Rust crate endpoints at compile time.
 
-## Usage
+## Installation
 
 Add the crates to your project:
 
 ```toml
 [dependencies]
-gradio_macro = "0.4"
+gradio_macro = "0.6"
 gradio = "0.3"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
 ```
 
-Then use the macro in your code:
+## Usage
 
 ```rust
 use gradio_macro::gradio_api;
-use std::fs;
 
 /// Define the API client using the macro
 #[gradio_api(url = "hf-audio/whisper-large-v3-turbo", option = "async")]
 pub struct WhisperLarge;
 
 #[tokio::main]
-async fn main() {
-    println!("Whisper Large V3 turbo");
+async fn main() -> anyhow::Result<()> {
+    let whisper = WhisperLarge::new().await?;
 
-    // Instantiate the API client
-    let whisper = WhisperLarge::new().await.unwrap();
+    // Every endpoint returns a builder — call `.call().await` to execute.
+    // `task` is optional (default: "transcribe"), so you can customise it:
+    let result = whisper
+        .predict("wavs/english.wav")
+        .with_task(WhisperLargePredictTask::Transcribe)
+        .call()
+        .await?;
 
-    // Call the API's predict method.
-    // `task` is optional (default: "transcribe"), so a builder is generated:
-    let result = whisper.predict("wavs/english.wav").call().await.unwrap();
-
-    // Handle the result
-    let result = result[0].clone().as_value().unwrap();
-
-    // Save the result to a file
-    std::fs::write("result.txt", format!("{}", result)).expect("Can't write to file");
-    println!("result written to result.txt");
+    let text = result[0].clone().as_value()?;
+    std::fs::write("result.txt", format!("{}", text)).expect("Can't write to file");
+    println!("Result written to result.txt");
+    Ok(())
 }
 ```
 
-This example demonstrates how to define an asynchronous API client using the `gradio_api` macro to interact with the `hf-audio/whisper-large-v3-turbo` Gradio model.
+### Builder API
+
+Every generated endpoint method returns a builder, regardless of whether it has optional parameters.
+Each builder has three execute methods:
+
+| Method | Description |
+|--------|-------------|
+| `.call().await?` | Waits for the full result; no progress output |
+| `.call_background().await?` | Returns a `PredictionStream` — drive it yourself |
+| `.call_cli().await?` | Streams queue/progress to `stderr` on the same line, returns the full result |
+
+```rust
+// Mandatory-only endpoint
+whisper.predict("audio.wav").call().await?;
+
+// Endpoint with optional parameters — chain .with_xxx() setters
+whisper.predict("audio.wav")
+    .with_task(WhisperLargePredictTask::Translate)
+    .call_cli()   // prints progress, then returns result
+    .await?;
+```
+
+### Streaming with `call_background()`
+
+For full control over queue/progress messages, use `.call_background()` to receive a
+`PredictionStream` handle and drive it yourself:
+
+```rust
+use gradio::{structs::QueueDataMessage, PredictionStream};
+
+let mut stream = whisper
+    .predict("audio.wav")
+    .call_background()
+    .await?;
+
+while let Some(msg) = stream.next().await {
+    match msg? {
+        QueueDataMessage::Estimation { rank, queue_size, rank_eta, .. } => {
+            eprint!("\rQueue {}/{} (ETA: {:.1}s)  ", rank + 1, queue_size, rank_eta.unwrap_or(0.0));
+        }
+        QueueDataMessage::ProcessStarts { .. } => eprint!("\rProcessing…    "),
+        QueueDataMessage::ProcessCompleted { output, success, .. } => {
+            eprintln!();
+            if success {
+                let outputs: Vec<_> = output.try_into().unwrap();
+                println!("{}", outputs[0].clone().as_value().unwrap());
+            }
+            break;
+        }
+        _ => {}
+    }
+}
+```
+
+### Custom endpoints
+
+Call any endpoint not covered by the generated methods using the builder-returning `custom_endpoint()`:
+
+```rust
+let result = whisper
+    .custom_endpoint("/my_endpoint", vec![gradio::PredictionInput::from_value("hello")])
+    .call()
+    .await?;
+```
 
 ### Macro parameters
 
@@ -50,26 +113,26 @@ This example demonstrates how to define an asynchronous API client using the `gr
 |-----------|----------|-------------|
 | `url` | ✅ | HuggingFace space identifier or full Gradio URL |
 | `option` | ✅ | `"sync"` or `"async"` |
-| `hf_token` | ❌ | HuggingFace API token |
+| `hf_token` | ❌ | HuggingFace API token (falls back to `HF_TOKEN` env var) |
 | `auth_username` | ❌ | HuggingFace username (pair with `auth_password`) |
 | `auth_password` | ❌ | HuggingFace password (pair with `auth_username`) |
 
-### Explanation
+### What is generated
 
-The macro generates the `WhisperLarge` struct and all its methods automatically from the live Gradio API spec:
+The macro generates the struct and all its methods automatically from the Gradio API spec:
 
-- Each named API endpoint becomes a method on the struct.
-- Endpoints with **optional parameters** (those with API-level defaults) generate a builder:
-  ```rust
-  whisper.predict("audio.wav")                          // mandatory params only
-      .with_task(WhisperLargePredictTask::Translate)    // optional setter (typed enum)
-      .call().await?                                    // execute
-  ```
-  Endpoints with only mandatory parameters are called directly.
-- `Literal[...]` Python types become typed Rust **enums** (e.g. `WhisperLargePredictTask::Transcribe`), providing compile-time safety instead of runtime string validation.
-- Parameter types are derived from the full Gradio API spec (`f64` for `float`, `i64` for `int`, `bool` for `bool`, `impl Into<std::path::PathBuf>` for file inputs, `impl Into<String>` for strings).
-- A `_background` variant of every direct method (or `call_background()` on a builder) returns a streaming `PredictionStream` handle instead of blocking.
-- Every generated method is documented with parameter names, types, descriptions and return-value information taken directly from the Gradio API spec – your IDE will show this information in hover tooltips.
+- Each named API endpoint becomes a **factory method** on the struct that returns a **builder**.
+- The builder always exposes `.call()`, `.call_background()`, and `.call_cli()` (async only).
+  `.call_cli()` streams queue and progress messages to `stderr` on the same terminal line (`\r`
+  updates) and returns the completed outputs — no boilerplate needed in your code.
+- Endpoints with **optional parameters** (those with API-level defaults) expose `.with_xxx()` setter
+  methods documented with the parameter description and default value.
+- `Literal[...]` Python types become typed Rust **enums**
+  (e.g. `WhisperLargePredictTask::Transcribe`), providing compile-time safety.
+- Parameter types are derived from the full Gradio API spec (`f64` for `float`, `i64` for `int`,
+  `bool` for `bool`, `impl Into<std::path::PathBuf>` for file inputs, `impl Into<String>` for strings).
+- Every generated method and setter is **documented** with parameter names, types, descriptions,
+  and return-value information taken from the Gradio API spec — your IDE shows this in hover tooltips.
 
 ## API caching
 
@@ -95,6 +158,7 @@ Without this feature, the macro **only** reads the local cache. If no cache is p
 You may commit the `.gradio_cache/` directory to version control for fully reproducible, offline-capable builds.  To always fetch a fresh spec instead, add `.gradio_cache/` to your `.gitignore`.
 
 ## Building CLI tools with `gradio_cli`
+
 `gradio_cli` turns a Gradio API spec into a fully-featured `clap` CLI in a single attribute:
 
 ```rust
@@ -144,7 +208,9 @@ become typed Rust enums for compile-time safety.
 
 ## How it works
 
-The `#[gradio_api(...)]` and `#[gradio_cli(...)]` attribute macros call the [gradio](https://crates.io/crates/gradio) Rust crate at compile time to introspect the target Gradio space and generate a bespoke client struct or CLI struct.
+The `#[gradio_api(...)]` and `#[gradio_cli(...)]` attribute macros call the
+[gradio](https://crates.io/crates/gradio) Rust crate at compile time to introspect the target
+Gradio space and generate a bespoke client struct or CLI struct.
 
 ## Limitations
 
@@ -154,4 +220,3 @@ The `#[gradio_api(...)]` and `#[gradio_cli(...)]` attribute macros call the [gra
 ## Credits
 
 Big Thanks to [Jacob Lin](https://github.com/JacobLinCool) for the [gradio-rs](https://github.com/JacobLinCool/gradio-rs) crate and assistance.
-

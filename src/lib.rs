@@ -578,20 +578,35 @@ fn make_default_expr(
     }
 }
 
-/// Build the doc-comment token streams for an endpoint.
+/// Build the doc-comment token streams for an endpoint's factory method.
+///
+/// Only mandatory (non-optional) parameters are listed in the factory-method doc.
+/// Optional parameters are documented individually in their `.with_xxx()` setter.
+///
+/// Returns:
+/// - `factory_doc_attrs`: `#[doc = ...]` attrs for the factory method.
+/// - `bg_doc`: Short doc string for `call_background()`.
 fn build_doc_attrs(
     name: &str,
     method_name: &Ident,
     info: &gradio::structs::EndpointInfo,
+    optional_flags: &[bool],
 ) -> (Vec<proc_macro2::TokenStream>, String) {
     let mut doc_lines: Vec<String> = Vec::new();
     doc_lines.push(format!("Calls the `{}` Gradio endpoint.", name));
     doc_lines.push(String::new());
 
-    if !info.parameters.is_empty() {
+    let mandatory_params: Vec<_> = info
+        .parameters
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !optional_flags.get(*i).copied().unwrap_or(false))
+        .collect();
+
+    if !mandatory_params.is_empty() {
         doc_lines.push("# Parameters".to_string());
         doc_lines.push(String::new());
-        for (i, param) in info.parameters.iter().enumerate() {
+        for (i, param) in &mandatory_params {
             let ident_name = param
                 .parameter_name
                 .as_deref()
@@ -613,11 +628,6 @@ fn build_doc_attrs(
             } else {
                 doc_lines.push(format!("- `{}` (`{}`): {}", ident_name, py_type, detail));
             }
-            if let Some(default) = &param.parameter_default {
-                if param.parameter_has_default.unwrap_or(false) {
-                    doc_lines.push(format!("  - Default: `{}`", default));
-                }
-            }
         }
     }
 
@@ -637,7 +647,7 @@ fn build_doc_attrs(
         }
     }
 
-    let doc_attrs: Vec<proc_macro2::TokenStream> = doc_lines
+    let factory_doc_attrs: Vec<proc_macro2::TokenStream> = doc_lines
         .iter()
         .map(|line| quote! { #[doc = #line] })
         .collect();
@@ -645,33 +655,134 @@ fn build_doc_attrs(
         "Submits the `{}` Gradio endpoint (`{}`) and returns a streaming handle.\nSee [`{}`] for parameter documentation.",
         name, method_name, method_name
     );
-    (doc_attrs, bg_doc)
+    (factory_doc_attrs, bg_doc)
 }
 
-/// A procedural macro for generating API client structs and methods for interacting with a Gradio-based API.
+/// Build the doc string for a single optional-parameter setter (`.with_xxx()`).
+fn build_setter_doc(param: &gradio::structs::ApiData, index: usize) -> String {
+    let raw_name = param
+        .parameter_name
+        .as_deref()
+        .or(param.label.as_deref())
+        .map(|name| name.to_owned())
+        .unwrap_or_else(|| format!("arg{}", index));
+    let ident_name = safe_ident(&raw_name.to_snake_case(), &format!("arg{}", index)).to_string();
+    let py_type = &param.python_type.r#type;
+    let description = param.python_type.description.trim();
+    let label = param.label.as_deref().unwrap_or("").trim();
+    let detail = if !description.is_empty() {
+        format!(" — {}", description)
+    } else if !label.is_empty() {
+        format!(" — {}", label)
+    } else {
+        String::new()
+    };
+    let default_part = if param.parameter_has_default.unwrap_or(false) {
+        if let Some(dv) = &param.parameter_default {
+            format!(" (default: `{}`)", dv)
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+    format!(
+        "Sets the `{}` optional parameter (`{}`){}{}.",
+        ident_name, py_type, detail, default_part
+    )
+}
+
+
+/// A procedural macro for generating a type-safe API client struct for a Gradio space.
 ///
-/// This macro generates a client struct for the specified Gradio API, along with methods to call the API endpoints
-/// synchronously or asynchronously, depending on the provided option.
+/// The macro introspects the API spec at compile time (using a local cache) and generates:
+///
+/// - A struct (the name you give to `#[gradio_api]`) with a `new()` constructor.
+/// - A **builder** returned by each named endpoint method. The builder always has:
+///   - `.call()` — executes the prediction and returns `Vec<PredictionOutput>`.
+///   - `.call_background()` — submits the prediction and returns a `PredictionStream` for
+///     streaming queue/progress messages.
+///   - `.call_cli()` *(async only)* — submits, pretty-prints queue/progress to `stderr` on the
+///     same terminal line, then returns `Vec<PredictionOutput>`. No boilerplate needed.
+///   - `.with_<param>()` setters for any **optional** parameters (those with API-level defaults).
+/// - Typed Rust enums for `Literal[...]` Python types, with `Display`, `Serialize`,
+///   `Deserialize`, and `FromStr` implementations.
+/// - A `custom_endpoint()` method that returns a builder for calling arbitrary endpoints.
 ///
 /// # Macro Parameters
 ///
-/// - `url`: **Required**. The base URL of the Gradio API.
-/// - `option`: **Required**. `"sync"` or `"async"`.
-/// - `hf_token` (optional): HuggingFace API token for private spaces.
-/// - `auth_username` (optional): HuggingFace username (must be paired with `auth_password`).
-/// - `auth_password` (optional): HuggingFace password (must be paired with `auth_username`).
+/// | Parameter | Required | Description |
+/// |-----------|----------|-------------|
+/// | `url` | ✅ | HuggingFace space identifier or full Gradio URL |
+/// | `option` | ✅ | `"sync"` or `"async"` |
+/// | `hf_token` | ❌ | HuggingFace API token (falls back to `HF_TOKEN` env var) |
+/// | `auth_username` | ❌ | HuggingFace username (pair with `auth_password`) |
+/// | `auth_password` | ❌ | HuggingFace password (pair with `auth_username`) |
 ///
 /// # API Caching
 ///
 /// The macro caches the API spec as a JSON file under `.gradio_cache/` in your project root
-/// (`CARGO_MANIFEST_DIR`). To refresh the cache:
+/// (`CARGO_MANIFEST_DIR`). Build with `--features gradio_macro/update_cache` to refresh:
 ///
 /// ```sh
 /// cargo build --features gradio_macro/update_cache
+/// HF_TOKEN=hf_... cargo build --features gradio_macro/update_cache  # private spaces
 /// ```
 ///
-/// You may commit the `.gradio_cache/` directory to version control for reproducible builds
-/// without network access, or add it to `.gitignore` to always fetch fresh specs.
+/// You may commit `.gradio_cache/` for reproducible offline builds, or add it to `.gitignore`
+/// to always fetch fresh specs.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use gradio_macro::gradio_api;
+///
+/// #[gradio_api(url = "hf-audio/whisper-large-v3-turbo", option = "async")]
+/// pub struct WhisperLarge;
+///
+/// #[tokio::main]
+/// async fn main() -> anyhow::Result<()> {
+///     let whisper = WhisperLarge::new().await?;
+///
+///     // .call_cli() pretty-prints progress to stderr, then returns the result.
+///     let result = whisper
+///         .predict("audio.wav")
+///         .with_task(WhisperLargePredictTask::Transcribe)
+///         .call_cli()
+///         .await?;
+///
+///     println!("{}", result[0].clone().as_value()?);
+///     Ok(())
+/// }
+/// ```
+///
+/// ## Manual streaming with `call_background()`
+///
+/// ```rust,ignore
+/// use gradio::{structs::QueueDataMessage, PredictionStream};
+///
+/// let mut stream = whisper
+///     .predict("audio.wav")
+///     .call_background()
+///     .await?;
+///
+/// while let Some(msg) = stream.next().await {
+///     match msg? {
+///         QueueDataMessage::Estimation { rank, queue_size, rank_eta, .. } => {
+///             eprint!("\rQueue {}/{} (ETA: {:.1}s)  ", rank + 1, queue_size, rank_eta.unwrap_or(0.0));
+///         }
+///         QueueDataMessage::ProcessCompleted { output, success, .. } => {
+///             eprintln!();
+///             if success {
+///                 let outputs: Vec<_> = output.try_into().unwrap();
+///                 println!("{}", outputs[0].clone().as_value().unwrap());
+///             }
+///             break;
+///         }
+///         _ => {}
+///     }
+/// }
+/// ```
 #[proc_macro_attribute]
 pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(args with Punctuated::<Meta, syn::Token![,]>::parse_terminated);
@@ -760,8 +871,6 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
         let ep_camel = name.trim_start_matches('/').to_upper_camel_case();
         let method_name = safe_ident(name, &format!("endpoint_{}", functions.len()));
 
-        let (doc_attrs, bg_doc) = build_doc_attrs(name, &method_name, info);
-
         // ── Per-param data ────────────────────────────────────────────────
         let mut p_idents: Vec<Ident> = Vec::new();
         let mut p_rust_types: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -825,220 +934,342 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
             p_enum_type_names.push(enum_type_name);
         }
 
-        let has_optional = p_is_optional.iter().any(|&v| v);
+        // ── Always use builder pattern ────────────────────────────────────
+        // Even endpoints with only mandatory parameters return a builder with
+        // `call()` and `call_background()` methods, giving a consistent API.
+        let builder_ident = Ident::new(
+            &format!("{}{}Builder", struct_name_str, ep_camel),
+            Span::call_site(),
+        );
 
-        if has_optional {
-            // ── Builder pattern ───────────────────────────────────────────
-            let builder_ident = Ident::new(
-                &format!("{}{}Builder", struct_name_str, ep_camel),
-                Span::call_site(),
-            );
+        let (doc_attrs, bg_doc) = build_doc_attrs(name, &method_name, info, &p_is_optional);
 
-            // Builder struct fields
-            let mut builder_field_defs: Vec<proc_macro2::TokenStream> = Vec::new();
-            builder_field_defs.push(quote! { client: &'a gradio::Client, });
-            for j in 0..p_idents.len() {
-                let id = &p_idents[j];
-                let ft = &p_field_types[j];
-                builder_field_defs.push(quote! { #id: #ft, });
+        // Builder struct fields (client ref + all params)
+        let mut builder_field_defs: Vec<proc_macro2::TokenStream> = Vec::new();
+        builder_field_defs.push(quote! { client: &'a gradio::Client, });
+        for j in 0..p_idents.len() {
+            let id = &p_idents[j];
+            let ft = &p_field_types[j];
+            builder_field_defs.push(quote! { #id: #ft, });
+        }
+
+        let builder_doc = format!("Builder for the `{}` endpoint of [`{}`].", name, struct_name_str);
+        let builder_struct = quote! {
+            #[doc = #builder_doc]
+            pub struct #builder_ident<'a> {
+                #(#builder_field_defs)*
             }
+        };
+        builder_structs.push(builder_struct);
 
-            let builder_doc = format!("Builder for the `{}` endpoint of [`{}`].", name, struct_name_str);
-            let builder_struct = quote! {
-                #[doc = #builder_doc]
-                pub struct #builder_ident<'a> {
-                    #(#builder_field_defs)*
-                }
-            };
-            builder_structs.push(builder_struct);
+        // Factory method: mandatory params as direct args, optional params get defaults
+        let mandatory_args: Vec<proc_macro2::TokenStream> = p_idents.iter()
+            .zip(p_rust_types.iter())
+            .zip(p_is_optional.iter())
+            .filter(|(_, &opt)| !opt)
+            .map(|((id, rt), _)| quote! { #id: #rt })
+            .collect();
 
-            // Factory method: mandatory params as direct args, optional params get defaults
-            let mandatory_args: Vec<proc_macro2::TokenStream> = p_idents.iter()
-                .zip(p_rust_types.iter())
-                .zip(p_is_optional.iter())
-                .filter(|(_, &opt)| !opt)
-                .map(|((id, rt), _)| quote! { #id: #rt })
-                .collect();
+        let mandatory_bindings: Vec<proc_macro2::TokenStream> = p_bindings.iter()
+            .zip(p_is_optional.iter())
+            .filter(|(_, &opt)| !opt)
+            .filter_map(|(b, _)| b.clone())
+            .collect();
 
-            let mandatory_bindings: Vec<proc_macro2::TokenStream> = p_bindings.iter()
-                .zip(p_is_optional.iter())
-                .filter(|(_, &opt)| !opt)
-                .filter_map(|(b, _)| b.clone())
-                .collect();
-
-            let init_fields: Vec<proc_macro2::TokenStream> = (0..p_idents.len())
-                .map(|j| {
-                    let id = &p_idents[j];
-                    if p_is_optional[j] {
-                        let enum_ident_opt = if !p_enum_type_names[j].is_empty()
-                            && p_variants[j].is_some()
-                        {
-                            Some(Ident::new(&p_enum_type_names[j], Span::call_site()))
-                        } else {
-                            None
-                        };
-                        let de = make_default_expr(
-                            &p_python_types[j],
-                            p_is_file[j],
-                            p_defaults[j].as_ref(),
-                            enum_ident_opt.as_ref(),
-                            p_variants[j].as_deref(),
-                        );
-                        quote! { #id: #de }
+        let init_fields: Vec<proc_macro2::TokenStream> = (0..p_idents.len())
+            .map(|j| {
+                let id = &p_idents[j];
+                if p_is_optional[j] {
+                    let enum_ident_opt = if !p_enum_type_names[j].is_empty()
+                        && p_variants[j].is_some()
+                    {
+                        Some(Ident::new(&p_enum_type_names[j], Span::call_site()))
                     } else {
-                        quote! { #id }
-                    }
-                })
-                .collect();
+                        None
+                    };
+                    let de = make_default_expr(
+                        &p_python_types[j],
+                        p_is_file[j],
+                        p_defaults[j].as_ref(),
+                        enum_ident_opt.as_ref(),
+                        p_variants[j].as_deref(),
+                    );
+                    quote! { #id: #de }
+                } else {
+                    quote! { #id }
+                }
+            })
+            .collect();
 
-            let factory_method = quote! {
-                #(#doc_attrs)*
-                pub fn #method_name(&self, #(#mandatory_args),*) -> #builder_ident<'_> {
-                    #(#mandatory_bindings)*
-                    #builder_ident {
-                        client: &self.client,
-                        #(#init_fields),*
+        let factory_method = quote! {
+            #(#doc_attrs)*
+            pub fn #method_name(&self, #(#mandatory_args),*) -> #builder_ident<'_> {
+                #(#mandatory_bindings)*
+                #builder_ident {
+                    client: &self.client,
+                    #(#init_fields),*
+                }
+            }
+        };
+        functions.push(factory_method);
+
+        // Setter methods for optional params — each gets its own doc comment
+        let setters: Vec<proc_macro2::TokenStream> = (0..p_idents.len())
+            .filter(|&j| p_is_optional[j])
+            .map(|j| {
+                let id = &p_idents[j];
+                let rt = &p_rust_types[j];
+                let setter_name = Ident::new(&format!("with_{}", id), Span::call_site());
+                let binding_ts = match &p_bindings[j] {
+                    Some(b) => quote! { #b },
+                    None => quote! {},
+                };
+                let setter_doc = if j < info.parameters.len() {
+                    build_setter_doc(&info.parameters[j], j)
+                } else {
+                    format!("Sets the `{}` parameter.", id)
+                };
+                quote! {
+                    #[doc = #setter_doc]
+                    pub fn #setter_name(mut self, #id: #rt) -> Self {
+                        #binding_ts
+                        self.#id = #id;
+                        self
                     }
                 }
-            };
-            functions.push(factory_method);
+            })
+            .collect();
 
-            // Setter methods for optional params
-            let setters: Vec<proc_macro2::TokenStream> = (0..p_idents.len())
-                .filter(|&j| p_is_optional[j])
-                .map(|j| {
-                    let id = &p_idents[j];
-                    let rt = &p_rust_types[j];
-                    let setter_name = Ident::new(&format!("with_{}", id), Span::call_site());
-                    let binding_ts = match &p_bindings[j] {
-                        Some(b) => quote! { #b },
-                        None => quote! {},
-                    };
-                    quote! {
-                        pub fn #setter_name(mut self, #id: #rt) -> Self {
-                            #binding_ts
-                            self.#id = #id;
-                            self
+        // Extract all fields in call()/call_background()
+        let extract_fields: Vec<proc_macro2::TokenStream> = p_idents.iter()
+            .map(|id| quote! { let #id = self.#id; })
+            .collect();
+
+        let validations: Vec<proc_macro2::TokenStream> = p_validations.iter()
+            .filter_map(|v| v.clone())
+            .collect();
+
+        let call_exprs: Vec<&proc_macro2::TokenStream> = p_call_exprs.iter().collect();
+
+        let call_methods = match option {
+            Syncity::Async => quote! {
+                /// Execute this request and return the full output.
+                pub async fn call(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
+                    let __builder_client = self.client;
+                    #(#extract_fields)*
+                    #(#validations)*
+                    __builder_client.predict(#name, vec![#(#call_exprs),*]).await
+                }
+
+                #[doc = #bg_doc]
+                pub async fn call_background(self) -> Result<gradio::PredictionStream, gradio::anyhow::Error> {
+                    let __builder_client = self.client;
+                    #(#extract_fields)*
+                    #(#validations)*
+                    __builder_client.submit(#name, vec![#(#call_exprs),*]).await
+                }
+
+                /// Submit this request and pretty-print queue / progress messages to `stderr`,
+                /// then return the full output.
+                ///
+                /// Uses `\r` to update the same terminal line while the task is queued or
+                /// running, so the console stays clean. Equivalent to calling
+                /// `.call_background().await?` and driving the stream yourself.
+                pub async fn call_cli(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
+                    use gradio::structs::QueueDataMessage;
+                    let mut stream = self.call_background().await?;
+                    loop {
+                        match stream.next().await {
+                            None => {
+                                eprintln!();
+                                return Err(gradio::anyhow::anyhow!("stream ended without a result"));
+                            }
+                            Some(Err(e)) => {
+                                eprintln!("\r[error] {:?}                    ", e);
+                                return Err(e);
+                            }
+                            Some(Ok(msg)) => match msg {
+                                QueueDataMessage::Open => {
+                                    eprint!("\rConnected, waiting in queue…    ");
+                                }
+                                QueueDataMessage::Estimation { rank, queue_size, rank_eta, .. } => {
+                                    eprint!(
+                                        "\rQueue position {}/{} (ETA: {:.1}s)  ",
+                                        rank + 1,
+                                        queue_size,
+                                        rank_eta.unwrap_or(0.0)
+                                    );
+                                }
+                                QueueDataMessage::ProcessStarts { .. } => {
+                                    eprint!("\rProcessing…                          ");
+                                }
+                                QueueDataMessage::Progress { progress_data, .. } => {
+                                    if let Some(pd) = progress_data {
+                                        if let Some(p) = pd.first() {
+                                            eprint!(
+                                                "\rProgress: {}/{} {:?}    ",
+                                                p.index + 1,
+                                                p.length.unwrap_or(0),
+                                                p.unit
+                                            );
+                                        }
+                                    }
+                                }
+                                QueueDataMessage::ProcessCompleted { output, success, .. } => {
+                                    eprintln!();
+                                    if !success {
+                                        return Err(gradio::anyhow::anyhow!("prediction failed"));
+                                    }
+                                    return output.try_into().map_err(|e: gradio::anyhow::Error| e);
+                                }
+                                QueueDataMessage::Log { event_id } => {
+                                    eprint!("\rLog: {}              ", event_id.unwrap_or_default());
+                                }
+                                QueueDataMessage::UnexpectedError { message } => {
+                                    eprintln!("\r[unexpected error] {}              ", message.unwrap_or_default());
+                                }
+                                QueueDataMessage::Heartbeat | QueueDataMessage::Unknown(_) => {}
+                            },
                         }
                     }
-                })
-                .collect();
-
-            // Extract all fields in call()/call_background()
-            let extract_fields: Vec<proc_macro2::TokenStream> = p_idents.iter()
-                .map(|id| quote! { let #id = self.#id; })
-                .collect();
-
-            let validations: Vec<proc_macro2::TokenStream> = p_validations.iter()
-                .filter_map(|v| v.clone())
-                .collect();
-
-            let call_exprs: Vec<&proc_macro2::TokenStream> = p_call_exprs.iter().collect();
-
-            let call_methods = match option {
-                Syncity::Async => quote! {
-                    /// Run this request and return the full output.
-                    pub async fn call(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
-                        let __builder_client = self.client;
-                        #(#extract_fields)*
-                        #(#validations)*
-                        __builder_client.predict(#name, vec![#(#call_exprs),*]).await
-                    }
-
-                    #[doc = #bg_doc]
-                    pub async fn call_background(self) -> Result<gradio::PredictionStream, gradio::anyhow::Error> {
-                        let __builder_client = self.client;
-                        #(#extract_fields)*
-                        #(#validations)*
-                        __builder_client.submit(#name, vec![#(#call_exprs),*]).await
-                    }
-                },
-                Syncity::Sync => quote! {
-                    /// Run this request and return the full output.
-                    pub fn call(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
-                        let __builder_client = self.client;
-                        #(#extract_fields)*
-                        #(#validations)*
-                        __builder_client.predict_sync(#name, vec![#(#call_exprs),*])
-                    }
-
-                    #[doc = #bg_doc]
-                    pub fn call_background(self) -> Result<gradio::PredictionStream, gradio::anyhow::Error> {
-                        let __builder_client = self.client;
-                        #(#extract_fields)*
-                        #(#validations)*
-                        __builder_client.submit_sync(#name, vec![#(#call_exprs),*])
-                    }
-                },
-            };
-
-            let builder_impl_doc = format!("Builder methods for the `{}` endpoint.", name);
-            let builder_impl_ts = quote! {
-                #[doc = #builder_impl_doc]
-                impl<'a> #builder_ident<'a> {
-                    #(#setters)*
-                    #call_methods
                 }
-            };
-            builder_impls.push(builder_impl_ts);
-        } else {
-            // ── Direct function (all params mandatory) ────────────────────
-            let background_name = Ident::new(
-                &format!("{}_background", method_name),
-                Span::call_site(),
-            );
+            },
+            Syncity::Sync => quote! {
+                /// Execute this request and return the full output.
+                pub fn call(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
+                    let __builder_client = self.client;
+                    #(#extract_fields)*
+                    #(#validations)*
+                    __builder_client.predict_sync(#name, vec![#(#call_exprs),*])
+                }
 
-            let args_def: Vec<proc_macro2::TokenStream> = p_idents.iter()
-                .zip(p_rust_types.iter())
-                .map(|(id, rt)| quote! { #id: #rt })
-                .collect();
+                #[doc = #bg_doc]
+                pub fn call_background(self) -> Result<gradio::PredictionStream, gradio::anyhow::Error> {
+                    let __builder_client = self.client;
+                    #(#extract_fields)*
+                    #(#validations)*
+                    __builder_client.submit_sync(#name, vec![#(#call_exprs),*])
+                }
+            },
+        };
 
-            let all_bindings: Vec<proc_macro2::TokenStream> = p_bindings.iter()
-                .filter_map(|b| b.clone())
-                .collect();
-
-            let validations: Vec<proc_macro2::TokenStream> = p_validations.iter()
-                .filter_map(|v| v.clone())
-                .collect();
-
-            let call_exprs: Vec<&proc_macro2::TokenStream> = p_call_exprs.iter().collect();
-
-            let function = match option {
-                Syncity::Sync => quote! {
-                    #(#doc_attrs)*
-                    pub fn #method_name(&self, #(#args_def),*) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
-                        #(#all_bindings)*
-                        #(#validations)*
-                        self.client.predict_sync(#name, vec![#(#call_exprs),*])
-                    }
-
-                    #[doc = #bg_doc]
-                    pub fn #background_name(&self, #(#args_def),*) -> Result<gradio::PredictionStream, gradio::anyhow::Error> {
-                        #(#all_bindings)*
-                        #(#validations)*
-                        self.client.submit_sync(#name, vec![#(#call_exprs),*])
-                    }
-                },
-                Syncity::Async => quote! {
-                    #(#doc_attrs)*
-                    pub async fn #method_name(&self, #(#args_def),*) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
-                        #(#all_bindings)*
-                        #(#validations)*
-                        self.client.predict(#name, vec![#(#call_exprs),*]).await
-                    }
-
-                    #[doc = #bg_doc]
-                    pub async fn #background_name(&self, #(#args_def),*) -> Result<gradio::PredictionStream, gradio::anyhow::Error> {
-                        #(#all_bindings)*
-                        #(#validations)*
-                        self.client.submit(#name, vec![#(#call_exprs),*]).await
-                    }
-                },
-            };
-
-            functions.push(function);
-        }
+        let builder_impl_doc = format!("Builder methods for the `{}` endpoint.", name);
+        let builder_impl_ts = quote! {
+            #[doc = #builder_impl_doc]
+            impl<'a> #builder_ident<'a> {
+                #(#setters)*
+                #call_methods
+            }
+        };
+        builder_impls.push(builder_impl_ts);
     }
+
+    // ── Custom-endpoint builder ───────────────────────────────────────────
+    let custom_builder_ident = Ident::new(
+        &format!("{}CustomEndpointBuilder", struct_name_str),
+        Span::call_site(),
+    );
+    let custom_builder_struct = quote! {
+        /// Builder returned by [`custom_endpoint`] for calling an arbitrary Gradio endpoint.
+        ///
+        /// Use `.call()` to wait for the full output or `.call_background()` to receive a
+        /// streaming [`gradio::PredictionStream`] handle.
+        pub struct #custom_builder_ident<'a> {
+            client: &'a gradio::Client,
+            endpoint: String,
+            arguments: Vec<gradio::PredictionInput>,
+        }
+    };
+
+    let custom_builder_impl = match option {
+        Syncity::Async => quote! {
+            impl<'a> #custom_builder_ident<'a> {
+                /// Execute the custom endpoint and return the full output.
+                pub async fn call(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
+                    let Self { client, endpoint, arguments } = self;
+                    client.predict(&endpoint, arguments).await
+                }
+                /// Submit the custom endpoint and return a streaming handle.
+                pub async fn call_background(self) -> Result<gradio::PredictionStream, gradio::anyhow::Error> {
+                    let Self { client, endpoint, arguments } = self;
+                    client.submit(&endpoint, arguments).await
+                }
+                /// Submit and pretty-print queue / progress messages to `stderr`, then return the full output.
+                pub async fn call_cli(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
+                    use gradio::structs::QueueDataMessage;
+                    let mut stream = self.call_background().await?;
+                    loop {
+                        match stream.next().await {
+                            None => {
+                                eprintln!();
+                                return Err(gradio::anyhow::anyhow!("stream ended without a result"));
+                            }
+                            Some(Err(e)) => {
+                                eprintln!("\r[error] {:?}                    ", e);
+                                return Err(e);
+                            }
+                            Some(Ok(msg)) => match msg {
+                                QueueDataMessage::Open => {
+                                    eprint!("\rConnected, waiting in queue…    ");
+                                }
+                                QueueDataMessage::Estimation { rank, queue_size, rank_eta, .. } => {
+                                    eprint!(
+                                        "\rQueue position {}/{} (ETA: {:.1}s)  ",
+                                        rank + 1,
+                                        queue_size,
+                                        rank_eta.unwrap_or(0.0)
+                                    );
+                                }
+                                QueueDataMessage::ProcessStarts { .. } => {
+                                    eprint!("\rProcessing…                          ");
+                                }
+                                QueueDataMessage::Progress { progress_data, .. } => {
+                                    if let Some(pd) = progress_data {
+                                        if let Some(p) = pd.first() {
+                                            eprint!(
+                                                "\rProgress: {}/{} {:?}    ",
+                                                p.index + 1,
+                                                p.length.unwrap_or(0),
+                                                p.unit
+                                            );
+                                        }
+                                    }
+                                }
+                                QueueDataMessage::ProcessCompleted { output, success, .. } => {
+                                    eprintln!();
+                                    if !success {
+                                        return Err(gradio::anyhow::anyhow!("prediction failed"));
+                                    }
+                                    return output.try_into().map_err(|e: gradio::anyhow::Error| e);
+                                }
+                                QueueDataMessage::Log { event_id } => {
+                                    eprint!("\rLog: {}              ", event_id.unwrap_or_default());
+                                }
+                                QueueDataMessage::UnexpectedError { message } => {
+                                    eprintln!("\r[unexpected error] {}              ", message.unwrap_or_default());
+                                }
+                                QueueDataMessage::Heartbeat | QueueDataMessage::Unknown(_) => {}
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        Syncity::Sync => quote! {
+            impl<'a> #custom_builder_ident<'a> {
+                /// Execute the custom endpoint and return the full output.
+                pub fn call(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
+                    let Self { client, endpoint, arguments } = self;
+                    client.predict_sync(&endpoint, arguments)
+                }
+                /// Submit the custom endpoint and return a streaming handle.
+                pub fn call_background(self) -> Result<gradio::PredictionStream, gradio::anyhow::Error> {
+                    let Self { client, endpoint, arguments } = self;
+                    client.submit_sync(&endpoint, arguments)
+                }
+            }
+        },
+    };
 
     // Build the final output
     let api_struct = match option {
@@ -1047,36 +1278,39 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
 
             #(#builder_structs)*
 
+            #custom_builder_struct
+
             #vis struct #struct_name {
                 client: gradio::Client,
             }
 
             #(#builder_impls)*
 
+            #custom_builder_impl
+
             #[allow(clippy::too_many_arguments)]
             impl #struct_name {
                 /// Create a new client connecting to the configured Gradio space.
+                ///
+                /// Reads `HF_TOKEN` from the environment when no `hf_token` was given to the macro.
                 pub fn new() -> Result<Self, gradio::anyhow::Error> {
                     let client = gradio::Client::new_sync(#url, #grad_opts_ts)?;
                     Ok(Self { client })
                 }
 
-                /// Call an arbitrary endpoint not covered by the generated methods.
+                /// Build a request for an arbitrary endpoint not covered by the generated methods.
+                ///
+                /// Returns a builder with `.call()` and `.call_background()` methods.
                 pub fn custom_endpoint(
                     &self,
-                    endpoint: &str,
+                    endpoint: impl Into<String>,
                     arguments: Vec<gradio::PredictionInput>,
-                ) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
-                    self.client.predict_sync(endpoint, arguments)
-                }
-
-                /// Submit an arbitrary endpoint and return a streaming handle.
-                pub fn custom_endpoint_background(
-                    &self,
-                    endpoint: &str,
-                    arguments: Vec<gradio::PredictionInput>,
-                ) -> Result<gradio::PredictionStream, gradio::anyhow::Error> {
-                    self.client.submit_sync(endpoint, arguments)
+                ) -> #custom_builder_ident<'_> {
+                    #custom_builder_ident {
+                        client: &self.client,
+                        endpoint: endpoint.into(),
+                        arguments,
+                    }
                 }
 
                 #(#functions)*
@@ -1087,36 +1321,39 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
 
             #(#builder_structs)*
 
+            #custom_builder_struct
+
             #vis struct #struct_name {
                 client: gradio::Client,
             }
 
             #(#builder_impls)*
 
+            #custom_builder_impl
+
             #[allow(clippy::too_many_arguments)]
             impl #struct_name {
                 /// Create a new client connecting to the configured Gradio space.
+                ///
+                /// Reads `HF_TOKEN` from the environment when no `hf_token` was given to the macro.
                 pub async fn new() -> Result<Self, gradio::anyhow::Error> {
                     let client = gradio::Client::new(#url, #grad_opts_ts).await?;
                     Ok(Self { client })
                 }
 
-                /// Call an arbitrary endpoint not covered by the generated methods.
-                pub async fn custom_endpoint(
+                /// Build a request for an arbitrary endpoint not covered by the generated methods.
+                ///
+                /// Returns a builder with `.call()` and `.call_background()` methods.
+                pub fn custom_endpoint(
                     &self,
-                    endpoint: &str,
+                    endpoint: impl Into<String>,
                     arguments: Vec<gradio::PredictionInput>,
-                ) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
-                    self.client.predict(endpoint, arguments).await
-                }
-
-                /// Submit an arbitrary endpoint and return a streaming handle.
-                pub async fn custom_endpoint_background(
-                    &self,
-                    endpoint: &str,
-                    arguments: Vec<gradio::PredictionInput>,
-                ) -> Result<gradio::PredictionStream, gradio::anyhow::Error> {
-                    self.client.submit(endpoint, arguments).await
+                ) -> #custom_builder_ident<'_> {
+                    #custom_builder_ident {
+                        client: &self.client,
+                        endpoint: endpoint.into(),
+                        arguments,
+                    }
                 }
 
                 #(#functions)*
@@ -1147,7 +1384,7 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
 /// pub struct WhisperCli;
 ///
 /// #[tokio::main]
-/// async fn main() -> anyhow::Result<()> {
+/// async fn main() -> Result<(), gradio::anyhow::Error> {
 ///     use clap::Parser;
 ///     let cli = WhisperCli::parse();
 ///     let result = cli.run().await?;
