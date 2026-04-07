@@ -98,9 +98,9 @@ async fn main() -> anyhow::Result<()> {
         .call()
         .await?;
 
-    // result[0] is the synthesised audio file
-    let file_data = result[0].clone().as_file()?;
-    let bytes = file_data.download(None).await?;
+    // `result.output` is a `gradio::GradioFileData` directly — no `.as_file()` needed.
+    // Field names come from the Gradio API spec; call `omni.api()` to list them.
+    let bytes = result.output.download(None).await?;
     tokio::fs::write(&args.output, bytes).await?;
     println!("Saved: {}", args.output);
 

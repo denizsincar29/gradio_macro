@@ -106,7 +106,12 @@ fn load_api_from_cache(url: &str) -> Option<gradio::structs::ApiInfo> {
 }
 
 /// Persist the API info to the local cache file.
-#[cfg(feature = "update_cache")]
+///
+/// This function is intentionally compiled in all configurations (not feature-gated)
+/// because it is called from two code paths:
+/// * When `update_cache` is enabled — after fetching a fresh spec from the network.
+/// * When `update_cache` is disabled and no cache exists — after the short-timeout
+///   fallback fetch succeeds, so the result is saved for future offline builds.
 fn save_api_to_cache(url: &str, api: &gradio::structs::ApiInfo) {
     let path = get_cache_path(url);
     if let Some(parent) = path.parent() {
@@ -143,10 +148,11 @@ fn get_cache_age_secs(url: &str) -> Option<u64> {
 /// Fetch (or load from cache) the Gradio API info for `url`.
 ///
 /// When the `update_cache` feature is active the spec is fetched from the
-/// network and written to the local cache. Otherwise only the local cache is
-/// used: a warning is printed when the cache is older than 7 days, and an
-/// error is returned when no cache exists at all.
-#[allow(unused_variables)]
+/// network and written to the local cache. Otherwise the local cache is
+/// checked first. If no cache exists, a short-timeout network request is
+/// attempted (10 s). On success the result is saved to the cache for future
+/// builds. On timeout or connection failure a descriptive compile-time error
+/// is returned.
 fn get_api_info(url: &str, opts: ClientOptions) -> Result<gradio::structs::ApiInfo, String> {
     #[cfg(feature = "update_cache")]
     {
@@ -158,26 +164,81 @@ fn get_api_info(url: &str, opts: ClientOptions) -> Result<gradio::structs::ApiIn
     }
     #[cfg(not(feature = "update_cache"))]
     {
-        match load_api_from_cache(url) {
-            Some(api) => {
-                if let Some(age) = get_cache_age_secs(url) {
-                    const SECS_PER_DAY: u64 = 24 * 3600;
-                    const SEVEN_DAYS_SECS: u64 = 7 * SECS_PER_DAY;
-                    if age > SEVEN_DAYS_SECS {
-                        let days = age / SECS_PER_DAY;
-                        eprintln!(
-                            "gradio_macro: cache for '{}' is {} day(s) old – \
-                             run `cargo build --features gradio_macro/update_cache` to refresh",
-                            url, days
-                        );
-                    }
+        // ── cache hit ────────────────────────────────────────────────────
+        if let Some(api) = load_api_from_cache(url) {
+            if let Some(age) = get_cache_age_secs(url) {
+                const SECS_PER_DAY: u64 = 24 * 3600;
+                const SEVEN_DAYS_SECS: u64 = 7 * SECS_PER_DAY;
+                if age > SEVEN_DAYS_SECS {
+                    let days = age / SECS_PER_DAY;
+                    eprintln!(
+                        "gradio_macro: cache for '{}' is {} day(s) old – \
+                         run `cargo build --features gradio_macro/update_cache` to refresh",
+                        url, days
+                    );
                 }
+            }
+            return Ok(api);
+        }
+
+        // ── no cache: short-timeout fetch ────────────────────────────────
+        // This lets rust-analyzer / VS Code expand the macro without hanging
+        // indefinitely when no cache exists. If the endpoint is unreachable
+        // the build fails with a clear error after at most 10 seconds.
+        //
+        // The timeout is enforced *inside* the async runtime so the spawned
+        // thread exits as soon as the deadline fires rather than lingering
+        // until the OS tears down the proc-macro process.
+        const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+        let url_owned = url.to_string();
+        let hf_token = opts.hf_token;
+        let auth = opts.auth;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            let fetch_opts = gradio::ClientOptions { hf_token, auth };
+            let result = rt.block_on(async move {
+                match tokio::time::timeout(
+                    FETCH_TIMEOUT,
+                    gradio::Client::new(&url_owned, fetch_opts),
+                )
+                .await
+                {
+                    Ok(Ok(client)) => Ok(client.view_api()),
+                    Ok(Err(e)) => Err(e.to_string()),
+                    Err(_) => Err(format!(
+                        "timed out after {} s",
+                        FETCH_TIMEOUT.as_secs()
+                    )),
+                }
+            });
+            let _ = tx.send(result);
+        });
+
+        // Give a small extra buffer beyond the async timeout so we don't race
+        // the channel send; the real bounding is done inside the runtime above.
+        match rx.recv_timeout(FETCH_TIMEOUT + std::time::Duration::from_secs(2)) {
+            Ok(Ok(api)) => {
+                // Persist the freshly-fetched spec so the next build is instant.
+                save_api_to_cache(url, &api);
                 Ok(api)
             }
-            None => Err(format!(
-                "no cache for '{}' – run: cargo build --features gradio_macro/update_cache",
-                url
+            Ok(Err(e)) => Err(format!(
+                "No cache found for the endpoint and failed to fetch the spec from the \
+                 endpoint: {}. Please make sure you are online and the endpoint is \
+                 correct, or enable update_cache feature to fetch the spec with normal \
+                 timeout.",
+                e
             )),
+            Err(_) => Err(
+                "No cache found for the endpoint and failed to fetch the spec from the \
+                 endpoint. Please make sure you are online and the endpoint is correct, \
+                 or enable update_cache feature to fetch the spec with normal timeout."
+                    .to_string(),
+            ),
         }
     }
 }
@@ -692,6 +753,69 @@ fn build_setter_doc(param: &gradio::structs::ApiData, index: usize) -> String {
     )
 }
 
+/// Build a human-readable summary of all named endpoints from an API spec.
+///
+/// The output mirrors the format that `gradio-rs` prints when you call
+/// `client.view_api()` on the command line.
+fn build_api_string(
+    api: &std::collections::HashMap<String, gradio::structs::EndpointInfo>,
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut names: Vec<&String> = api.keys().collect();
+    names.sort();
+    for name in names {
+        let info = &api[name];
+        lines.push(format!("{}:", name));
+        if !info.parameters.is_empty() {
+            lines.push("  Parameters:".to_string());
+            for (i, param) in info.parameters.iter().enumerate() {
+                let fallback = format!("arg{}", i);
+                let label = param
+                    .parameter_name
+                    .as_deref()
+                    .or(param.label.as_deref())
+                    .unwrap_or(&fallback);
+                let py_type = &param.python_type.r#type;
+                let desc = param.python_type.description.trim();
+                let has_default = param.parameter_has_default.unwrap_or(false);
+                let default_str = if has_default {
+                    if let Some(dv) = &param.parameter_default {
+                        format!(" [default: {}]", dv)
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+                if desc.is_empty() {
+                    lines.push(format!("    {} ({}){}", label, py_type, default_str));
+                } else {
+                    lines.push(format!("    {} ({}){}  — {}", label, py_type, default_str, desc));
+                }
+            }
+        } else {
+            lines.push("  Parameters:  (none)".to_string());
+        }
+        if !info.returns.is_empty() {
+            lines.push("  Returns:".to_string());
+            for ret in &info.returns {
+                let label = ret.label.as_deref().unwrap_or("output");
+                let py_type = &ret.python_type.r#type;
+                let desc = ret.python_type.description.trim();
+                if desc.is_empty() {
+                    lines.push(format!("    {} ({})", label, py_type));
+                } else {
+                    lines.push(format!("    {} ({})  — {}", label, py_type, desc));
+                }
+            }
+        } else {
+            lines.push("  Returns:  (none)".to_string());
+        }
+        lines.push(String::new());
+    }
+    lines.join("\n")
+}
+
 
 /// A procedural macro for generating a type-safe API client struct for a Gradio space.
 ///
@@ -835,11 +959,21 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
         return make_compile_error("option is required");
     };
 
-    let api = match get_api_info(&url, grad_opts) {
+    let api_info = match get_api_info(&url, grad_opts) {
         Ok(api) => api,
         Err(e) => return make_compile_error(&format!("Failed to fetch Gradio API for \"{}\": {}", url, e)),
     };
-    let api = api.named_endpoints;
+    let api = api_info.named_endpoints;
+
+    // Build the two static strings that `.endpoints()` and `.api()` will return.
+    let endpoints_json = match serde_json::to_string(&api) {
+        Ok(json) => json,
+        Err(e) => return make_compile_error(&format!(
+            "Failed to serialize generated Gradio endpoint specification for \"{}\": {}",
+            url, e
+        )),
+    };
+    let api_human_str = build_api_string(&api);
 
     let grad_auth_ts = if grad_auth.is_some() {
         quote! { Some((#grad_login.to_string(), #grad_password.to_string())) }
@@ -863,6 +997,7 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
     let struct_name_str = struct_name.to_string();
 
     let mut enum_defs: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut output_types: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut builder_structs: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut builder_impls: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut functions: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -933,6 +1068,103 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
             p_variants.push(variants);
             p_enum_type_names.push(enum_type_name);
         }
+
+        // ── Output types ──────────────────────────────────────────────────
+        // Generate a typed output struct for each endpoint so that `call()`
+        // returns a concrete struct with named fields instead of a raw
+        // `Vec<gradio::PredictionOutput>`.
+        //
+        // The concrete field type is resolved from the Gradio API spec at
+        // compile time:
+        //   `filepath`  →  `gradio::GradioFileData`
+        //   anything else  →  `serde_json::Value`
+        //
+        // No intermediate wrapper structs are generated — the field holds the
+        // final value directly, so no `.as_file()` / `.as_value()` call is
+        // needed at the call site.
+        let output_struct_ident = Ident::new(
+            &format!("{}{}Output", struct_name_str, ep_camel),
+            Span::call_site(),
+        );
+
+        let mut output_struct_field_defs: Vec<proc_macro2::TokenStream> = Vec::new();
+        let mut output_try_from_fields: Vec<proc_macro2::TokenStream> = Vec::new();
+
+        for (ret_idx, ret) in info.returns.iter().enumerate() {
+            let ret_label = ret.label.as_deref().unwrap_or("output");
+            let field_ident = safe_ident(ret_label, &format!("output_{}", ret_idx));
+
+            let py_type = &ret.python_type.r#type;
+            let desc = ret.python_type.description.trim();
+            let is_ret_file = py_type == "filepath";
+
+            // Concrete Rust type based on the API-spec return type.
+            let field_rust_type: proc_macro2::TokenStream = if is_ret_file {
+                quote! { gradio::GradioFileData }
+            } else {
+                quote! { serde_json::Value }
+            };
+
+            // Expression that converts a `PredictionOutput` into the concrete type.
+            let extract_expr: proc_macro2::TokenStream = if is_ret_file {
+                quote! { __item.as_file()? }
+            } else {
+                quote! { __item.as_value()? }
+            };
+
+            let field_doc = if desc.is_empty() {
+                format!("`{}` (`{}`) output.", ret_label, py_type)
+            } else {
+                format!("`{}` (`{}`) output: {}", ret_label, py_type, desc)
+            };
+            output_struct_field_defs.push(quote! {
+                #[doc = #field_doc]
+                pub #field_ident: #field_rust_type,
+            });
+
+            output_try_from_fields.push(quote! {
+                #field_ident: {
+                    // Safety: exact count validated above.
+                    let __item = __iter.next().unwrap();
+                    #extract_expr
+                },
+            });
+        }
+
+        let output_struct_doc = format!(
+            "Typed output of the `{}` endpoint of [`{}`].",
+            name, struct_name_str
+        );
+        let expected_count_lit = proc_macro2::Literal::usize_suffixed(info.returns.len());
+        let output_struct_def = quote! {
+            #[doc = #output_struct_doc]
+            #[derive(Clone, Debug)]
+            pub struct #output_struct_ident {
+                #(#output_struct_field_defs)*
+            }
+
+            impl std::convert::TryFrom<Vec<gradio::PredictionOutput>> for #output_struct_ident {
+                type Error = gradio::anyhow::Error;
+
+                fn try_from(outputs: Vec<gradio::PredictionOutput>) -> Result<Self, Self::Error> {
+                    let __expected = #expected_count_lit;
+                    let __actual = outputs.len();
+                    if __actual != __expected {
+                        return Err(gradio::anyhow::anyhow!(
+                            "endpoint returned {} output(s) but the API spec expects {}",
+                            __actual,
+                            __expected,
+                        ));
+                    }
+                    let mut __iter = outputs.into_iter();
+                    Ok(Self {
+                        #(#output_try_from_fields)*
+                    })
+                }
+            }
+        };
+
+        output_types.push(output_struct_def);
 
         // ── Always use builder pattern ────────────────────────────────────
         // Even endpoints with only mandatory parameters return a builder with
@@ -1053,12 +1285,13 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
 
         let call_methods = match option {
             Syncity::Async => quote! {
-                /// Execute this request and return the full output.
-                pub async fn call(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
+                /// Execute this request and return the typed output.
+                pub async fn call(self) -> Result<#output_struct_ident, gradio::anyhow::Error> {
                     let __builder_client = self.client;
                     #(#extract_fields)*
                     #(#validations)*
-                    __builder_client.predict(#name, vec![#(#call_exprs),*]).await
+                    let __raw = __builder_client.predict(#name, vec![#(#call_exprs),*]).await?;
+                    std::convert::TryFrom::try_from(__raw)
                 }
 
                 #[doc = #bg_doc]
@@ -1070,12 +1303,12 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
 
                 /// Submit this request and pretty-print queue / progress messages to `stderr`,
-                /// then return the full output.
+                /// then return the typed output.
                 ///
                 /// Uses `\r` to update the same terminal line while the task is queued or
                 /// running, so the console stays clean. Equivalent to calling
                 /// `.call_background().await?` and driving the stream yourself.
-                pub async fn call_cli(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
+                pub async fn call_cli(self) -> Result<#output_struct_ident, gradio::anyhow::Error> {
                     use gradio::structs::QueueDataMessage;
                     let mut stream = self.call_background().await?;
                     loop {
@@ -1097,7 +1330,7 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                                         "\rQueue position {}/{} (ETA: {:.1}s)  ",
                                         rank + 1,
                                         queue_size,
-                                        rank_eta.unwrap_or(0.0)
+                                        rank_eta
                                     );
                                 }
                                 QueueDataMessage::ProcessStarts { .. } => {
@@ -1120,7 +1353,9 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                                     if !success {
                                         return Err(gradio::anyhow::anyhow!("prediction failed"));
                                     }
-                                    return output.try_into().map_err(|e: gradio::anyhow::Error| e);
+                                    let __raw: Vec<gradio::PredictionOutput> =
+                                        output.try_into().map_err(|e: gradio::anyhow::Error| e)?;
+                                    return std::convert::TryFrom::try_from(__raw);
                                 }
                                 QueueDataMessage::Log { event_id } => {
                                     eprint!("\rLog: {}              ", event_id.unwrap_or_default());
@@ -1135,12 +1370,13 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
             },
             Syncity::Sync => quote! {
-                /// Execute this request and return the full output.
-                pub fn call(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
+                /// Execute this request and return the typed output.
+                pub fn call(self) -> Result<#output_struct_ident, gradio::anyhow::Error> {
                     let __builder_client = self.client;
                     #(#extract_fields)*
                     #(#validations)*
-                    __builder_client.predict_sync(#name, vec![#(#call_exprs),*])
+                    let __raw = __builder_client.predict_sync(#name, vec![#(#call_exprs),*])?;
+                    std::convert::TryFrom::try_from(__raw)
                 }
 
                 #[doc = #bg_doc]
@@ -1184,7 +1420,7 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
     let custom_builder_impl = match option {
         Syncity::Async => quote! {
             impl<'a> #custom_builder_ident<'a> {
-                /// Execute the custom endpoint and return the full output.
+                /// Execute the custom endpoint and return the raw outputs.
                 pub async fn call(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
                     let Self { client, endpoint, arguments } = self;
                     client.predict(&endpoint, arguments).await
@@ -1194,7 +1430,7 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                     let Self { client, endpoint, arguments } = self;
                     client.submit(&endpoint, arguments).await
                 }
-                /// Submit and pretty-print queue / progress messages to `stderr`, then return the full output.
+                /// Submit and pretty-print queue / progress messages to `stderr`, then return the raw outputs.
                 pub async fn call_cli(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
                     use gradio::structs::QueueDataMessage;
                     let mut stream = self.call_background().await?;
@@ -1217,7 +1453,7 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                                         "\rQueue position {}/{} (ETA: {:.1}s)  ",
                                         rank + 1,
                                         queue_size,
-                                        rank_eta.unwrap_or(0.0)
+                                        rank_eta
                                     );
                                 }
                                 QueueDataMessage::ProcessStarts { .. } => {
@@ -1257,7 +1493,7 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
         },
         Syncity::Sync => quote! {
             impl<'a> #custom_builder_ident<'a> {
-                /// Execute the custom endpoint and return the full output.
+                /// Execute the custom endpoint and return the raw outputs.
                 pub fn call(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
                     let Self { client, endpoint, arguments } = self;
                     client.predict_sync(&endpoint, arguments)
@@ -1271,10 +1507,44 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
         },
     };
 
+    // Methods shared by both sync and async variants that expose the embedded API spec.
+    let endpoints_doc = format!(
+        "Returns the raw JSON spec for the named endpoints of the `{}` Gradio space.",
+        url
+    );
+    let api_doc = format!(
+        "Returns a human-readable description of all endpoints of the `{}` Gradio space.",
+        url
+    );
+    let spec_methods = quote! {
+        #[doc = #endpoints_doc]
+        ///
+        /// The value is the `named_endpoints` map from the Gradio `/info` response,
+        /// serialised to JSON at compile time and embedded in the binary.
+        /// The JSON is parsed at most once per process (cached in an `OnceLock`).
+        pub fn endpoints(&self) -> serde_json::Value {
+            static ENDPOINTS: std::sync::OnceLock<serde_json::Value> =
+                std::sync::OnceLock::new();
+            ENDPOINTS
+                .get_or_init(|| {
+                    serde_json::from_str(#endpoints_json)
+                        .expect("embedded endpoint spec is valid JSON")
+                })
+                .clone()
+        }
+
+        #[doc = #api_doc]
+        pub fn api(&self) -> &'static str {
+            #api_human_str
+        }
+    };
+
     // Build the final output
     let api_struct = match option {
         Syncity::Sync => quote! {
             #(#enum_defs)*
+
+            #(#output_types)*
 
             #(#builder_structs)*
 
@@ -1313,11 +1583,15 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                     }
                 }
 
+                #spec_methods
+
                 #(#functions)*
             }
         },
         Syncity::Async => quote! {
             #(#enum_defs)*
+
+            #(#output_types)*
 
             #(#builder_structs)*
 
@@ -1355,6 +1629,8 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                         arguments,
                     }
                 }
+
+                #spec_methods
 
                 #(#functions)*
             }

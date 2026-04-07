@@ -5,7 +5,7 @@
 //
 // Usage:
 //   cargo run --example vocal -- -i audio.wav
-//   cargo run --example vocal -- -i audio.wav --model BS-RoFormer --vocals out_vocals.wav --background out_bg.wav
+//   cargo run --example vocal -- -i audio.wav --vocals out_vocals.wav --background out_bg.wav
 
 use clap::Parser;
 use gradio_macro::gradio_api;
@@ -44,15 +44,16 @@ async fn main() {
 
     // `separate` has optional parameters (model choice, etc.) – use the builder.
     // Call .call().await to execute with default optional params.
+    // The returned typed struct has named fields: `vocals` and `background`.
     let result = vocal
         .separate(&args.input)
         .call()
         .await
         .expect("Failed to separate vocals");
 
-    // result[0] is vocals, result[1] is background
-    let vocals_file = result[0].clone().as_file().unwrap();
-    let background_file = result[1].clone().as_file().unwrap();
+    // Access outputs by name — fields hold concrete types directly (no `.as_file()` needed).
+    let vocals_file = result.vocals;
+    let background_file = result.background;
 
     let vocals_task = tokio::spawn({
         let path = args.vocals.clone();

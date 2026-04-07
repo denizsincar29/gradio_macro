@@ -35,7 +35,8 @@ async fn main() -> anyhow::Result<()> {
         .call()
         .await?;
 
-    let text = result[0].clone().as_value()?;
+    // `call()` returns a typed struct — access outputs by name with concrete types:
+    let text: serde_json::Value = result.output;  // str → serde_json::Value
     std::fs::write("result.txt", format!("{}", text)).expect("Can't write to file");
     println!("Result written to result.txt");
     Ok(())
@@ -51,17 +52,66 @@ Each builder has three execute methods:
 |--------|-------------|
 | `.call().await?` | Waits for the full result; no progress output |
 | `.call_background().await?` | Returns a `PredictionStream` — drive it yourself |
-| `.call_cli().await?` | Streams queue/progress to `stderr` on the same line, returns the full result |
+| `.call_cli().await?` | Streams queue/progress to `stderr` on the same line, returns the typed result |
 
 ```rust
 // Mandatory-only endpoint
 whisper.predict("audio.wav").call().await?;
 
 // Endpoint with optional parameters — chain .with_xxx() setters
-whisper.predict("audio.wav")
+let result = whisper.predict("audio.wav")
     .with_task(WhisperLargePredictTask::Translate)
-    .call_cli()   // prints progress, then returns result
+    .call_cli()   // prints progress, then returns typed result
     .await?;
+
+// Access the transcription text directly — no conversion call needed:
+let text: serde_json::Value = result.output;  // str → serde_json::Value
+println!("{}", text);
+```
+
+### Typed Output Structs
+
+`call()` and `call_cli()` return a **typed struct** for each endpoint instead of a raw
+`Vec<PredictionOutput>`.  Every return value from the Gradio API spec becomes a named field
+holding a **concrete Rust type** resolved at compile time:
+
+| Gradio API type | Rust field type |
+|-----------------|-----------------|
+| `filepath` | `gradio::GradioFileData` |
+| `str`, `int`, `float`, `bool`, etc. | `serde_json::Value` |
+
+No `.as_file()` or `.as_value()` call is needed at the call site:
+
+```rust
+// Whisper: output is str → field is serde_json::Value
+let result = whisper.predict("audio.wav").call().await?;
+let text: serde_json::Value = result.output;
+println!("{}", text);
+
+// Vocal separation: both outputs are filepath → fields are GradioFileData
+let result = vocal.separate("audio.wav").call().await?;
+let vocals_bytes    = result.vocals.download(None).await?;
+let background_bytes = result.background.download(None).await?;
+```
+
+Use the `.api()` method to discover field names at runtime (useful while exploring a new
+space):
+
+```rust
+println!("{}", whisper.api());
+// /predict:
+//   Parameters:
+//     inputs (filepath)  — Audio file
+//     task (Literal['transcribe', 'translate']) [default: "transcribe"]  — Task
+//   Returns:
+//     output (str)  — Transcription
+```
+
+Use `.endpoints()` to get the raw JSON spec as a `serde_json::Value`:
+
+```rust
+let spec = whisper.endpoints();
+println!("{}", serde_json::to_string_pretty(&spec).unwrap());
 ```
 
 ### Streaming with `call_background()`
@@ -80,7 +130,7 @@ let mut stream = whisper
 while let Some(msg) = stream.next().await {
     match msg? {
         QueueDataMessage::Estimation { rank, queue_size, rank_eta, .. } => {
-            eprint!("\rQueue {}/{} (ETA: {:.1}s)  ", rank + 1, queue_size, rank_eta.unwrap_or(0.0));
+            eprint!("\rQueue {}/{} (ETA: {:.1}s)  ", rank + 1, queue_size, rank_eta);
         }
         QueueDataMessage::ProcessStarts { .. } => eprint!("\rProcessing…    "),
         QueueDataMessage::ProcessCompleted { output, success, .. } => {
@@ -107,6 +157,9 @@ let result = whisper
     .await?;
 ```
 
+`custom_endpoint()` returns `Vec<gradio::PredictionOutput>` since the output structure is
+not known at compile time.
+
 ### Macro parameters
 
 | Parameter | Required | Description |
@@ -124,20 +177,31 @@ The macro generates the struct and all its methods automatically from the Gradio
 - Each named API endpoint becomes a **factory method** on the struct that returns a **builder**.
 - The builder always exposes `.call()`, `.call_background()`, and `.call_cli()` (async only).
   `.call_cli()` streams queue and progress messages to `stderr` on the same terminal line (`\r`
-  updates) and returns the completed outputs — no boilerplate needed in your code.
+  updates) and returns the completed typed output — no boilerplate needed in your code.
+- `call()` and `call_cli()` return a **typed output struct** (e.g. `WhisperLargePredictOutput`)
+  with named fields for each return value.  Field types are resolved from the Gradio API spec at
+  compile time: `filepath` returns become `gradio::GradioFileData`, all other types become
+  `serde_json::Value`.  No `.as_file()` / `.as_value()` call is needed at the call site.
 - Endpoints with **optional parameters** (those with API-level defaults) expose `.with_xxx()` setter
   methods documented with the parameter description and default value.
 - `Literal[...]` Python types become typed Rust **enums**
   (e.g. `WhisperLargePredictTask::Transcribe`), providing compile-time safety.
 - Parameter types are derived from the full Gradio API spec (`f64` for `float`, `i64` for `int`,
   `bool` for `bool`, `impl Into<std::path::PathBuf>` for file inputs, `impl Into<String>` for strings).
-- Every generated method and setter is **documented** with parameter names, types, descriptions,
-  and return-value information taken from the Gradio API spec — your IDE shows this in hover tooltips.
+- Every generated method, setter, and output type is **documented** with parameter names, types,
+  descriptions, and return-value information taken from the Gradio API spec — your IDE shows this
+  in hover tooltips.
+- `.endpoints()` returns the named-endpoints spec as a `serde_json::Value`.
+- `.api()` returns a human-readable `&str` listing every endpoint, its parameters, and its returns.
 
 ## API caching
 
 The macro spec from the Gradio server is cached in `.gradio_cache/<url>.json` in your project root.
 Subsequent builds load the spec from the cache without making any network request, so **VS Code / rust-analyzer will not hang**.
+
+When no cache exists and `update_cache` is **not** enabled, the macro attempts a short network
+request (10 s timeout) to fetch the spec automatically.  If the endpoint is unreachable the build
+fails with a clear error message.
 
 ### Populating and refreshing the cache
 
@@ -151,7 +215,8 @@ cargo build --features gradio_macro/update_cache
 HF_TOKEN=hf_... cargo build --features gradio_macro/update_cache
 ```
 
-Without this feature, the macro **only** reads the local cache. If no cache is present the build fails with a clear error message pointing at this command. If the cache is older than 7 days a warning is printed.
+Without this feature, the macro first checks the local cache.  If no cache is present it falls
+back to a 10 s network request.  If the cache is older than 7 days a warning is printed.
 
 ### Committing the cache
 
@@ -214,7 +279,10 @@ Gradio space and generate a bespoke client struct or CLI struct.
 
 ## Limitations
 
-- Prediction outputs are `Vec<gradio::PredictionOutput>` (dynamically typed).  Extract values with `.as_value()` or `.as_file()`.
+- Output struct fields hold concrete types resolved from the Gradio API spec at compile time:
+  `filepath` → `gradio::GradioFileData`, everything else → `serde_json::Value` — no `.as_file()`
+  or `.as_value()` needed.  For `custom_endpoint()` and `gradio_cli`, outputs remain
+  `Vec<gradio::PredictionOutput>` (type not known at compile time).
 - Complex input types (lists, dicts, etc.) fall back to `impl gradio::serde::Serialize`.
 
 ## Credits

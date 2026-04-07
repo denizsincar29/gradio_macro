@@ -46,15 +46,18 @@ async fn main() -> anyhow::Result<()> {
 
     let generator = SoundGenerator::new().await?;
 
-    // .call_cli() streams progress to stderr on the same line, then returns the result.
+    // .call_cli() streams progress to stderr on the same line, then returns the typed output.
+    // Field names are derived from the Gradio API spec; call `generator.api()` to list them.
     let result = generator
         .gradio_generate(prompt)
         .with_duration(args.duration)
         .call_cli()
         .await?;
 
-    let file = result[0].clone().as_file()?;
-    let bytes = file.download(None).await?;
+    // The generated audio file is in the first (and only) return field.
+    // `result.output` is a `gradio::GradioFileData` directly — no `.as_file()` needed.
+    // Use `generator.api()` to confirm the exact field name for this space.
+    let bytes = result.output.download(None).await?;
     tokio::fs::write(&args.output, bytes).await?;
     println!("Saved: {}", args.output);
     Ok(())
