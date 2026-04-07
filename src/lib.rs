@@ -660,12 +660,13 @@ fn build_doc_attrs(
 
 /// Build the doc string for a single optional-parameter setter (`.with_xxx()`).
 fn build_setter_doc(param: &gradio::structs::ApiData, index: usize) -> String {
-    let ident_name = param
+    let raw_name = param
         .parameter_name
         .as_deref()
         .or(param.label.as_deref())
-        .unwrap_or(&format!("arg{}", index))
-        .to_snake_case();
+        .map(|name| name.to_owned())
+        .unwrap_or_else(|| format!("arg{}", index));
+    let ident_name = safe_ident(&raw_name.to_snake_case(), &format!("arg{}", index)).to_string();
     let py_type = &param.python_type.r#type;
     let description = param.python_type.description.trim();
     let label = param.label.as_deref().unwrap_or("").trim();
@@ -686,10 +687,11 @@ fn build_setter_doc(param: &gradio::structs::ApiData, index: usize) -> String {
         String::new()
     };
     format!(
-        "Sets the `{}` optional parameter (`{}`){}{} .",
+        "Sets the `{}` optional parameter (`{}`){}{}.",
         ident_name, py_type, detail, default_part
     )
 }
+
 
 /// A procedural macro for generating a type-safe API client struct for a Gradio space.
 ///
@@ -1084,6 +1086,7 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                             }
                             Some(Err(e)) => {
                                 eprintln!("\r[error] {:?}                    ", e);
+                                return Err(e);
                             }
                             Some(Ok(msg)) => match msg {
                                 QueueDataMessage::Open => {
@@ -1183,11 +1186,13 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
             impl<'a> #custom_builder_ident<'a> {
                 /// Execute the custom endpoint and return the full output.
                 pub async fn call(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
-                    self.client.predict(&self.endpoint, self.arguments).await
+                    let Self { client, endpoint, arguments } = self;
+                    client.predict(&endpoint, arguments).await
                 }
                 /// Submit the custom endpoint and return a streaming handle.
                 pub async fn call_background(self) -> Result<gradio::PredictionStream, gradio::anyhow::Error> {
-                    self.client.submit(&self.endpoint, self.arguments).await
+                    let Self { client, endpoint, arguments } = self;
+                    client.submit(&endpoint, arguments).await
                 }
                 /// Submit and pretty-print queue / progress messages to `stderr`, then return the full output.
                 pub async fn call_cli(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
@@ -1201,6 +1206,7 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                             }
                             Some(Err(e)) => {
                                 eprintln!("\r[error] {:?}                    ", e);
+                                return Err(e);
                             }
                             Some(Ok(msg)) => match msg {
                                 QueueDataMessage::Open => {
@@ -1253,11 +1259,13 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
             impl<'a> #custom_builder_ident<'a> {
                 /// Execute the custom endpoint and return the full output.
                 pub fn call(self) -> Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> {
-                    self.client.predict_sync(&self.endpoint, self.arguments)
+                    let Self { client, endpoint, arguments } = self;
+                    client.predict_sync(&endpoint, arguments)
                 }
                 /// Submit the custom endpoint and return a streaming handle.
                 pub fn call_background(self) -> Result<gradio::PredictionStream, gradio::anyhow::Error> {
-                    self.client.submit_sync(&self.endpoint, self.arguments)
+                    let Self { client, endpoint, arguments } = self;
+                    client.submit_sync(&endpoint, arguments)
                 }
             }
         },

@@ -11,6 +11,7 @@ Add the crates to your project:
 gradio_macro = "0.6"
 gradio = "0.3"
 tokio = { version = "1", features = ["full"] }
+anyhow = "1"
 ```
 
 ## Usage
@@ -54,7 +55,7 @@ Each builder has three execute methods:
 
 ```rust
 // Mandatory-only endpoint
-client.encode("text").call().await?;
+whisper.predict("audio.wav").call().await?;
 
 // Endpoint with optional parameters — chain .with_xxx() setters
 whisper.predict("audio.wav")
@@ -100,7 +101,7 @@ while let Some(msg) = stream.next().await {
 Call any endpoint not covered by the generated methods using the builder-returning `custom_endpoint()`:
 
 ```rust
-let result = client
+let result = whisper
     .custom_endpoint("/my_endpoint", vec![gradio::PredictionInput::from_value("hello")])
     .call()
     .await?;
