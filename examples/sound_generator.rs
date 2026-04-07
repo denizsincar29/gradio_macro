@@ -55,9 +55,9 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     // The generated audio file is in the first (and only) return field.
+    // `result.output` is a `gradio::GradioFileData` directly — no `.as_file()` needed.
     // Use `generator.api()` to confirm the exact field name for this space.
-    let file = result.output.as_file()?;
-    let bytes = file.download(None).await?;
+    let bytes = result.output.download(None).await?;
     tokio::fs::write(&args.output, bytes).await?;
     println!("Saved: {}", args.output);
     Ok(())

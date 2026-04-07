@@ -35,8 +35,8 @@ async fn main() -> anyhow::Result<()> {
         .call()
         .await?;
 
-    // `call()` returns a typed struct — access outputs by name:
-    let text = result.output.as_value()?;
+    // `call()` returns a typed struct — access outputs by name with concrete types:
+    let text: serde_json::Value = result.output;  // str → serde_json::Value
     std::fs::write("result.txt", format!("{}", text)).expect("Can't write to file");
     println!("Result written to result.txt");
     Ok(())
@@ -64,26 +64,35 @@ let result = whisper.predict("audio.wav")
     .call_cli()   // prints progress, then returns typed result
     .await?;
 
-// Access the transcription text by field name:
-let text = result.output.as_value()?;
+// Access the transcription text directly — no conversion call needed:
+let text: serde_json::Value = result.output;  // str → serde_json::Value
+println!("{}", text);
 ```
 
 ### Typed Output Structs
 
 `call()` and `call_cli()` return a **typed struct** for each endpoint instead of a raw
-`Vec<PredictionOutput>`.  Every return value from the Gradio API becomes a named field so
-you never have to guess which index holds which value:
+`Vec<PredictionOutput>`.  Every return value from the Gradio API spec becomes a named field
+holding a **concrete Rust type** resolved at compile time:
+
+| Gradio API type | Rust field type |
+|-----------------|-----------------|
+| `filepath` | `gradio::GradioFileData` |
+| `str`, `int`, `float`, `bool`, etc. | `serde_json::Value` |
+
+No `.as_file()` or `.as_value()` call is needed at the call site:
 
 ```rust
-// Vocal separation — two outputs, accessed by name:
-let result = vocal.separate("audio.wav").call().await?;
-let vocals_data    = result.vocals.as_file()?;
-let background_data = result.background.as_file()?;
-```
+// Whisper: output is str → field is serde_json::Value
+let result = whisper.predict("audio.wav").call().await?;
+let text: serde_json::Value = result.output;
+println!("{}", text);
 
-Each field is a thin wrapper around `gradio::PredictionOutput` that exposes the same
-methods directly (`as_value()`, `as_file()`, `is_file()`, `is_value()`), plus a doc-comment
-describing what the output contains.
+// Vocal separation: both outputs are filepath → fields are GradioFileData
+let result = vocal.separate("audio.wav").call().await?;
+let vocals_bytes    = result.vocals.download(None).await?;
+let background_bytes = result.background.download(None).await?;
+```
 
 Use the `.api()` method to discover field names at runtime (useful while exploring a new
 space):
@@ -170,8 +179,9 @@ The macro generates the struct and all its methods automatically from the Gradio
   `.call_cli()` streams queue and progress messages to `stderr` on the same terminal line (`\r`
   updates) and returns the completed typed output — no boilerplate needed in your code.
 - `call()` and `call_cli()` return a **typed output struct** (e.g. `WhisperLargePredictOutput`)
-  with named fields for each return value.  Each field wraps a `gradio::PredictionOutput` and
-  delegates its methods (`as_value()`, `as_file()`, etc.) so you can call them directly.
+  with named fields for each return value.  Field types are resolved from the Gradio API spec at
+  compile time: `filepath` returns become `gradio::GradioFileData`, all other types become
+  `serde_json::Value`.  No `.as_file()` / `.as_value()` call is needed at the call site.
 - Endpoints with **optional parameters** (those with API-level defaults) expose `.with_xxx()` setter
   methods documented with the parameter description and default value.
 - `Literal[...]` Python types become typed Rust **enums**
@@ -269,9 +279,10 @@ Gradio space and generate a bespoke client struct or CLI struct.
 
 ## Limitations
 
-- Prediction outputs are wrapped in typed structs (e.g. `WhisperLargePredictOutput`).
-  Use `.as_value()` or `.as_file()` on each field.  For `custom_endpoint()` and
-  `gradio_cli`, outputs are `Vec<gradio::PredictionOutput>` (dynamically typed).
+- Output struct fields hold concrete types resolved from the Gradio API spec at compile time:
+  `filepath` → `gradio::GradioFileData`, everything else → `serde_json::Value` — no `.as_file()`
+  or `.as_value()` needed.  For `custom_endpoint()` and `gradio_cli`, outputs remain
+  `Vec<gradio::PredictionOutput>` (type not known at compile time).
 - Complex input types (lists, dicts, etc.) fall back to `impl gradio::serde::Serialize`.
 
 ## Credits

@@ -1045,71 +1045,44 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
         // Generate a typed output struct for each endpoint so that `call()`
         // returns a concrete struct with named fields instead of a raw
         // `Vec<gradio::PredictionOutput>`.
+        //
+        // The concrete field type is resolved from the Gradio API spec at
+        // compile time:
+        //   `filepath`  →  `gradio::GradioFileData`
+        //   anything else  →  `serde_json::Value`
+        //
+        // No intermediate wrapper structs are generated — the field holds the
+        // final value directly, so no `.as_file()` / `.as_value()` call is
+        // needed at the call site.
         let output_struct_ident = Ident::new(
             &format!("{}{}Output", struct_name_str, ep_camel),
             Span::call_site(),
         );
 
-        let mut output_wrapper_defs: Vec<proc_macro2::TokenStream> = Vec::new();
         let mut output_struct_field_defs: Vec<proc_macro2::TokenStream> = Vec::new();
         let mut output_try_from_fields: Vec<proc_macro2::TokenStream> = Vec::new();
 
         for (ret_idx, ret) in info.returns.iter().enumerate() {
             let ret_label = ret.label.as_deref().unwrap_or("output");
             let field_ident = safe_ident(ret_label, &format!("output_{}", ret_idx));
-            let field_camel = {
-                let c = ret_label.to_upper_camel_case();
-                if c.is_empty() { format!("Output{}", ret_idx) } else { c }
-            };
-            let wrapper_type_ident = Ident::new(
-                &format!("{}{}Out{}", struct_name_str, ep_camel, field_camel),
-                Span::call_site(),
-            );
 
             let py_type = &ret.python_type.r#type;
             let desc = ret.python_type.description.trim();
-            let wrapper_doc = if desc.is_empty() {
-                format!(
-                    "Wraps the `{}` (`{}`) output of the `{}` endpoint of [`{}`].",
-                    ret_label, py_type, name, struct_name_str
-                )
+            let is_ret_file = py_type == "filepath";
+
+            // Concrete Rust type based on the API-spec return type.
+            let field_rust_type: proc_macro2::TokenStream = if is_ret_file {
+                quote! { gradio::GradioFileData }
             } else {
-                format!(
-                    "Wraps the `{}` (`{}`) output of the `{}` endpoint of [`{}`]: {}",
-                    ret_label, py_type, name, struct_name_str, desc
-                )
+                quote! { serde_json::Value }
             };
 
-            let wrapper_def = quote! {
-                #[doc = #wrapper_doc]
-                #[derive(Clone, Debug)]
-                pub struct #wrapper_type_ident {
-                    inner: gradio::PredictionOutput,
-                }
-
-                impl #wrapper_type_ident {
-                    /// Returns `true` if this output contains a file.
-                    pub fn is_file(&self) -> bool {
-                        self.inner.is_file()
-                    }
-
-                    /// Returns `true` if this output contains a plain value.
-                    pub fn is_value(&self) -> bool {
-                        self.inner.is_value()
-                    }
-
-                    /// Extracts the file data. Returns an error if this output is not a file.
-                    pub fn as_file(self) -> Result<gradio::GradioFileData, gradio::anyhow::Error> {
-                        self.inner.as_file()
-                    }
-
-                    /// Extracts the JSON value. Returns an error if this output is not a value.
-                    pub fn as_value(self) -> Result<serde_json::Value, gradio::anyhow::Error> {
-                        self.inner.as_value()
-                    }
-                }
+            // Expression that converts a `PredictionOutput` into the concrete type.
+            let extract_expr: proc_macro2::TokenStream = if is_ret_file {
+                quote! { __item.as_file()? }
+            } else {
+                quote! { __item.as_value()? }
             };
-            output_wrapper_defs.push(wrapper_def);
 
             let field_doc = if desc.is_empty() {
                 format!("`{}` (`{}`) output.", ret_label, py_type)
@@ -1118,15 +1091,16 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
             };
             output_struct_field_defs.push(quote! {
                 #[doc = #field_doc]
-                pub #field_ident: #wrapper_type_ident,
+                pub #field_ident: #field_rust_type,
             });
 
             let idx_lit = proc_macro2::Literal::usize_suffixed(ret_idx);
             output_try_from_fields.push(quote! {
-                #field_ident: #wrapper_type_ident {
-                    inner: __iter.next().ok_or_else(|| gradio::anyhow::anyhow!(
+                #field_ident: {
+                    let __item = __iter.next().ok_or_else(|| gradio::anyhow::anyhow!(
                         "expected output at index {} but the vector was too short", #idx_lit
-                    ))?
+                    ))?;
+                    #extract_expr
                 },
             });
         }
@@ -1154,9 +1128,6 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
             }
         };
 
-        for wd in output_wrapper_defs {
-            output_types.push(wd);
-        }
         output_types.push(output_struct_def);
 
         // ── Always use builder pattern ────────────────────────────────────

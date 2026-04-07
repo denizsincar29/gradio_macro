@@ -58,10 +58,10 @@ async fn main() -> anyhow::Result<()> {
         .call_cli()
         .await?;
 
-    // `result.output` is the transcription text.  Field names come from the
-    // Gradio API spec; run `println!("{}", whisper.api())` to see all fields.
-    let text = result.output.as_value()?;
-    fs::write(&args.output, format!("{}", text)).expect("Can't write to file");
+    // `result.output` is a `serde_json::Value` holding the transcription text.
+    // Field names and types come from the Gradio API spec; run
+    // `println!("{}", whisper.api())` to see all fields.
+    fs::write(&args.output, format!("{}", result.output)).expect("Can't write to file");
     println!("Result written to {}", args.output);
     Ok(())
 }

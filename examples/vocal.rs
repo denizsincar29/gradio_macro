@@ -51,9 +51,9 @@ async fn main() {
         .await
         .expect("Failed to separate vocals");
 
-    // Access outputs by name — no index juggling needed.
-    let vocals_file = result.vocals.as_file().unwrap();
-    let background_file = result.background.as_file().unwrap();
+    // Access outputs by name — fields hold concrete types directly (no `.as_file()` needed).
+    let vocals_file = result.vocals;
+    let background_file = result.background;
 
     let vocals_task = tokio::spawn({
         let path = args.vocals.clone();
