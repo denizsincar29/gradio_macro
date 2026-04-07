@@ -6,7 +6,7 @@
 //! ## Macros
 //!
 //! - [`gradio_api`] — generates a fully-typed struct with builder methods for every named
-//!   endpoint, plus a [`check_cache`] helper for detecting upstream API spec changes during
+//!   endpoint, plus a [`check_cache()`] helper for detecting upstream API spec changes during
 //!   development.
 //! - [`gradio_cli`] — generates a [`clap::Parser`]-based CLI struct from the same spec.
 //!

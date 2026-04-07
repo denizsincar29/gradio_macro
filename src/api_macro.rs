@@ -829,10 +829,14 @@ pub(crate) fn build_check_cache_method(
         /// - Returns `true` when the spec is unchanged.
         ///
         /// **Release builds**: always returns `true` immediately (zero overhead).
+        #[cfg(debug_assertions)]
         pub fn check_cache(&self) -> bool {
-            #[cfg(debug_assertions)]
-            return Self::#check_impl_fn_name(&self.client);
-            #[allow(unreachable_code)]
+            Self::#check_impl_fn_name(&self.client)
+        }
+
+        /// No-op in release builds — always returns `true`.
+        #[cfg(not(debug_assertions))]
+        pub fn check_cache(&self) -> bool {
             true
         }
 
