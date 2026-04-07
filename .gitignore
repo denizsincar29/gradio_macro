@@ -1,4 +1,5 @@
 *.wav
+*.mp3
 result.txt
 /target
 # Ignore the gradio cache directory, since it causes a pain in the bottom when it comes to publishing to crates.io, since every run of an example creates a new cache entry, which causes cargo to smell the dirty repo.
