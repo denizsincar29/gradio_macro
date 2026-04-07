@@ -41,6 +41,9 @@ async fn main() -> anyhow::Result<()> {
     println!("Whisper large-v3-turbo");
     let whisper = WhisperLarge::new().await?;
 
+    // Print the human-readable API description (useful for discovering field names).
+    // eprintln!("{}", whisper.api());
+
     // `predict` has an optional `task` parameter (Literal enum), so a builder is returned.
     // Parse the CLI string into the generated typed enum via its FromStr impl.
     let task: WhisperLargePredictTask = args.task
@@ -48,14 +51,16 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| panic!("invalid task '{}'; expected \"transcribe\" or \"translate\"", args.task));
 
     // .call_cli() streams queue/progress to stderr on the same terminal line,
-    // then returns the completed outputs.
+    // then returns the typed output struct for this endpoint.
     let result = whisper
         .predict(&args.input)
         .with_task(task)
         .call_cli()
         .await?;
 
-    let text = result[0].clone().as_value()?;
+    // `result.output` is the transcription text.  Field names come from the
+    // Gradio API spec; run `println!("{}", whisper.api())` to see all fields.
+    let text = result.output.as_value()?;
     fs::write(&args.output, format!("{}", text)).expect("Can't write to file");
     println!("Result written to {}", args.output);
     Ok(())
