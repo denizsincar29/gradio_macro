@@ -185,20 +185,42 @@ fn get_api_info(url: &str, opts: ClientOptions) -> Result<gradio::structs::ApiIn
         // This lets rust-analyzer / VS Code expand the macro without hanging
         // indefinitely when no cache exists. If the endpoint is unreachable
         // the build fails with a clear error after at most 10 seconds.
+        //
+        // The timeout is enforced *inside* the async runtime so the spawned
+        // thread exits as soon as the deadline fires rather than lingering
+        // until the OS tears down the proc-macro process.
+        const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
         let url_owned = url.to_string();
         let hf_token = opts.hf_token;
         let auth = opts.auth;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
             let fetch_opts = gradio::ClientOptions { hf_token, auth };
-            let result = gradio::Client::new_sync(&url_owned, fetch_opts)
-                .map(|client| client.view_api())
-                .map_err(|e| e.to_string());
+            let result = rt.block_on(async move {
+                match tokio::time::timeout(
+                    FETCH_TIMEOUT,
+                    gradio::Client::new(&url_owned, fetch_opts),
+                )
+                .await
+                {
+                    Ok(Ok(client)) => Ok(client.view_api()),
+                    Ok(Err(e)) => Err(e.to_string()),
+                    Err(_) => Err(format!(
+                        "timed out after {} s",
+                        FETCH_TIMEOUT.as_secs()
+                    )),
+                }
+            });
             let _ = tx.send(result);
         });
 
-        const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-        match rx.recv_timeout(FETCH_TIMEOUT) {
+        // Give a small extra buffer beyond the async timeout so we don't race
+        // the channel send; the real bounding is done inside the runtime above.
+        match rx.recv_timeout(FETCH_TIMEOUT + std::time::Duration::from_secs(2)) {
             Ok(Ok(api)) => {
                 // Persist the freshly-fetched spec so the next build is instant.
                 save_api_to_cache(url, &api);
@@ -944,7 +966,13 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
     let api = api_info.named_endpoints;
 
     // Build the two static strings that `.endpoints()` and `.api()` will return.
-    let endpoints_json = serde_json::to_string(&api).unwrap_or_else(|_| "{}".to_string());
+    let endpoints_json = match serde_json::to_string(&api) {
+        Ok(json) => json,
+        Err(e) => return make_compile_error(&format!(
+            "Failed to serialize generated Gradio endpoint specification for \"{}\": {}",
+            url, e
+        )),
+    };
     let api_human_str = build_api_string(&api);
 
     let grad_auth_ts = if grad_auth.is_some() {
@@ -1094,12 +1122,10 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                 pub #field_ident: #field_rust_type,
             });
 
-            let idx_lit = proc_macro2::Literal::usize_suffixed(ret_idx);
             output_try_from_fields.push(quote! {
                 #field_ident: {
-                    let __item = __iter.next().ok_or_else(|| gradio::anyhow::anyhow!(
-                        "expected output at index {} but the vector was too short", #idx_lit
-                    ))?;
+                    // Safety: exact count validated above.
+                    let __item = __iter.next().unwrap();
                     #extract_expr
                 },
             });
@@ -1109,6 +1135,7 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
             "Typed output of the `{}` endpoint of [`{}`].",
             name, struct_name_str
         );
+        let expected_count_lit = proc_macro2::Literal::usize_suffixed(info.returns.len());
         let output_struct_def = quote! {
             #[doc = #output_struct_doc]
             #[derive(Clone, Debug)]
@@ -1120,6 +1147,15 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                 type Error = gradio::anyhow::Error;
 
                 fn try_from(outputs: Vec<gradio::PredictionOutput>) -> Result<Self, Self::Error> {
+                    let __expected = #expected_count_lit;
+                    let __actual = outputs.len();
+                    if __actual != __expected {
+                        return Err(gradio::anyhow::anyhow!(
+                            "endpoint returned {} output(s) but the API spec expects {}",
+                            __actual,
+                            __expected,
+                        ));
+                    }
                     let mut __iter = outputs.into_iter();
                     Ok(Self {
                         #(#output_try_from_fields)*
@@ -1485,9 +1521,16 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
         ///
         /// The value is the `named_endpoints` map from the Gradio `/info` response,
         /// serialised to JSON at compile time and embedded in the binary.
+        /// The JSON is parsed at most once per process (cached in an `OnceLock`).
         pub fn endpoints(&self) -> serde_json::Value {
-            serde_json::from_str(#endpoints_json)
-                .expect("embedded endpoint spec is valid JSON")
+            static ENDPOINTS: std::sync::OnceLock<serde_json::Value> =
+                std::sync::OnceLock::new();
+            ENDPOINTS
+                .get_or_init(|| {
+                    serde_json::from_str(#endpoints_json)
+                        .expect("embedded endpoint spec is valid JSON")
+                })
+                .clone()
         }
 
         #[doc = #api_doc]
