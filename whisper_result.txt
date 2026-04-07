@@ -1,1 +1,0 @@
-" Hello. This is a test of the Whisper Speech Recognition System. The quick brown fox jumps over the lazy dog."
