@@ -525,12 +525,14 @@ const RUST_KEYWORDS: &[&str] = &[
 
 /// Strip non-ASCII characters from a snake_case string, collapsing multiple
 /// consecutive underscores into one and trimming leading/trailing underscores.
+/// ASCII uppercase letters are lowercased so they are preserved as valid identifier
+/// characters even if `to_snake_case()` somehow leaves them in mixed case.
 fn ascii_snake(s: &str) -> String {
     let mut out = String::new();
     let mut last_underscore = false;
     for c in s.chars() {
-        if c.is_ascii_lowercase() || c.is_ascii_digit() {
-            out.push(c);
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
             last_underscore = false;
         } else if c == '_' || (!c.is_ascii() && c.is_alphabetic()) {
             // Underscores and non-ASCII alphabetic characters are treated as
@@ -558,8 +560,9 @@ fn safe_ident(name: &str, fallback: &str) -> Ident {
         snake_cased
     };
     // If still empty after ASCII filtering, use positional fallback directly
+    // (positional fallbacks like "arg_0", "output_0" are already ASCII-safe).
     let with_fallback = if with_fallback.is_empty() {
-        fallback.to_string()
+        ascii_snake(fallback)
     } else {
         with_fallback
     };
@@ -1387,12 +1390,11 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                                 }
                                 QueueDataMessage::ProcessCompleted { output, success, .. } => {
                                     eprintln!();
+                                    let __raw: Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> = output.try_into();
                                     if !success {
-                                        return Err(gradio::anyhow::anyhow!("prediction failed"));
+                                        return Err(__raw.err().unwrap_or_else(|| gradio::anyhow::anyhow!("prediction failed")));
                                     }
-                                    let __raw: Vec<gradio::PredictionOutput> =
-                                        output.try_into().map_err(|e: gradio::anyhow::Error| e)?;
-                                    return std::convert::TryFrom::try_from(__raw);
+                                    return std::convert::TryFrom::try_from(__raw?);
                                 }
                                 QueueDataMessage::Log { event_id } => {
                                     eprint!("\rLog: {}              ", event_id.unwrap_or_default());
@@ -1510,10 +1512,11 @@ pub fn gradio_api(args: TokenStream, input: TokenStream) -> TokenStream {
                                 }
                                 QueueDataMessage::ProcessCompleted { output, success, .. } => {
                                     eprintln!();
+                                    let __raw: Result<Vec<gradio::PredictionOutput>, gradio::anyhow::Error> = output.try_into();
                                     if !success {
-                                        return Err(gradio::anyhow::anyhow!("prediction failed"));
+                                        return Err(__raw.err().unwrap_or_else(|| gradio::anyhow::anyhow!("prediction failed")));
                                     }
-                                    return output.try_into().map_err(|e: gradio::anyhow::Error| e);
+                                    return __raw;
                                 }
                                 QueueDataMessage::Log { event_id } => {
                                     eprint!("\rLog: {}              ", event_id.unwrap_or_default());
