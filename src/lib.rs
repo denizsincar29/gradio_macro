@@ -106,6 +106,12 @@ fn load_api_from_cache(url: &str) -> Option<gradio::structs::ApiInfo> {
 }
 
 /// Persist the API info to the local cache file.
+///
+/// This function is intentionally compiled in all configurations (not feature-gated)
+/// because it is called from two code paths:
+/// * When `update_cache` is enabled — after fetching a fresh spec from the network.
+/// * When `update_cache` is disabled and no cache exists — after the short-timeout
+///   fallback fetch succeeds, so the result is saved for future offline builds.
 fn save_api_to_cache(url: &str, api: &gradio::structs::ApiInfo) {
     let path = get_cache_path(url);
     if let Some(parent) = path.parent() {
