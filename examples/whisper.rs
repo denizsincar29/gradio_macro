@@ -1,6 +1,6 @@
 // Whisper large-v3-turbo transcription/translation example.
 //
-// Streams progress to the terminal and writes the result to a file.
+// Streams progress to the terminal (same-line updates) and writes the result to a file.
 //
 // Build note: populate the cache first:
 //   cargo build --features gradio_macro/update_cache
@@ -35,49 +35,55 @@ struct Args {
     output: String,
 }
 
+/// Stream queue and progress messages, updating the same terminal line.
+/// Returns the final outputs when the prediction completes.
 pub async fn show_progress(stream: &mut PredictionStream) -> Option<Vec<PredictionOutput>> {
     while let Some(message) = stream.next().await {
         if let Err(val) = message {
-            eprintln!("Error: {:?}", val);
+            eprintln!("\rError: {:?}                    ", val);
             continue;
         }
         match message.unwrap() {
-            QueueDataMessage::Open => println!("Task started"),
-            QueueDataMessage::Progress { event_id: _, eta, progress_data } => {
-                println!("Processing (ETA: {:?})", eta);
+            QueueDataMessage::Open => eprint!("\rConnected, waiting in queue…    "),
+            QueueDataMessage::Estimation { rank, queue_size, rank_eta, .. } => {
+                eprint!(
+                    "\rQueue position {}/{} (ETA: {:.1}s)  ",
+                    rank + 1,
+                    queue_size,
+                    rank_eta.unwrap_or(0.0)
+                );
+            }
+            QueueDataMessage::ProcessStarts { .. } => {
+                eprint!("\rProcessing…                          ");
+            }
+            QueueDataMessage::Progress { progress_data, .. } => {
                 if let Some(pd) = progress_data {
                     let p = &pd[0];
-                    println!("  {}/{} {:?}", p.index + 1, p.length.unwrap_or(0), p.unit);
+                    eprint!(
+                        "\rProgress: {}/{} {:?}    ",
+                        p.index + 1,
+                        p.length.unwrap_or(0),
+                        p.unit
+                    );
                 }
             }
-            QueueDataMessage::ProcessCompleted { event_id: _, output, success } => {
+            QueueDataMessage::ProcessCompleted { output, success, .. } => {
+                eprintln!(); // finish the inline progress line
                 if !success {
-                    eprintln!("Failed");
+                    eprintln!("Failed.");
                     return None;
                 }
-                println!("Completed!");
+                eprintln!("Completed!");
                 return Some(output.try_into().unwrap());
             }
             QueueDataMessage::Heartbeat => {}
-            QueueDataMessage::Estimation { event_id: _, rank, queue_size, rank_eta } => {
-                println!("In queue: {}/{} (ETA: {:?})", rank + 1, queue_size, rank_eta);
-            }
             QueueDataMessage::Log { event_id } => {
-                println!("Log: {}", event_id.unwrap_or_default());
-            }
-            QueueDataMessage::ProcessStarts { event_id: _, eta, progress_data } => {
-                println!("Processing (ETA: {:?})", eta);
-                if let Some(pd) = progress_data {
-                    let p = &pd[0];
-                    println!("  {}/{} {:?}", p.index + 1, p.length.unwrap_or(0), p.unit);
-                }
+                eprint!("\rLog: {}              ", event_id.unwrap_or_default());
             }
             QueueDataMessage::UnexpectedError { message } => {
-                eprintln!("Unexpected error: {}", message.unwrap_or_default());
+                eprintln!("\rUnexpected error: {}", message.unwrap_or_default());
             }
-            QueueDataMessage::Unknown(m) => {
-                eprintln!("[warning] Unknown message: {:?}", m);
-            }
+            QueueDataMessage::Unknown(_) => {}
         }
     }
     None
